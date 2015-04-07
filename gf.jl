@@ -42,12 +42,17 @@ bot(::Type{Sign}) = Sign(bot(L3), 0)
 istop(x::Sign) = istop(x.tag)
 isbot(x::Sign) = isbot(x.tag)
 Base.show(io::IO, x::Sign) = (istop(x) | isbot(x)) ? show(io, x.tag) : print(io, "sign(", x.s > 0 ? "+" : x.s < 0 ? "-" : "0", ")")
-<=(x::Sign,y::Sign) = istop(y) || isbot(x)
+<=(x::Sign,y::Sign) = istop(y) || isbot(x) || x.s == y.s
+function join(x::Sign,y::Sign)
+    x <= y && return y
+    y <= x && return x
+    top(Sign)
+end
 eval_lit(::Type{Sign}, v) = top(Sign)
 eval_lit(::Type{Sign}, v::Int) = Sign(sign(v))
 # ========== Interpreter
 
-const TRACE = true
+const TRACE = false
 
 immutable Code
     body :: Vector{Any}
@@ -59,7 +64,21 @@ function Base.show(io::IO, c::Code)
 end
 Base.getindex(c::Code, pc::Int) = c.body[pc]
 
-type Thread{StoreT,ValueT}
+type FunctionState{StoreT}
+    flow_s :: Vector{StoreT}
+end
+
+function join!{S}(s::FunctionState{S}, pc::Int, store::S)
+    if !isdefined(s.flow_s, pc)
+        s.flow_s[pc] = fork(store)
+        true
+    else
+        join!(s.flow_s[pc], store)
+    end
+end
+
+type Thread{StoreT,ValueT,StateT}
+    state :: StateT
     store :: StoreT
     linear_expr :: Vector{Any}
     stack :: Vector{ValueT}
@@ -68,7 +87,8 @@ type Thread{StoreT,ValueT}
     ec :: Int
     retval :: ValueT
 end
-Thread(store,ValueT::Type,code::Code) = Thread(store, [], Array(ValueT,0), code, 1, 1, bot(ValueT))
+
+Thread(state,store,ValueT::Type,code::Code) = Thread(state,store, [], Array(ValueT,0), code, 1, 1, bot(ValueT))
 function Base.show(io::IO,t::Thread)
     println(io, "abstract thread in ", t.code, " at ", t.pc, ":")
     if !done(t)
@@ -83,7 +103,7 @@ end
 
 function fork{S,V}(t::Thread{S,V})
     @assert isempty(t.linear_expr) && isempty(t.stack)
-    Thread(fork(t.store), [], Array(V,0), t.code, t.pc, 1, bot(V))
+    Thread(t.state, fork(t.store), [], Array(V,0), t.code, t.pc, 1, bot(V))
 end
 
 immutable LocalStore{V}
@@ -97,7 +117,21 @@ function Base.show(io::IO,s::LocalStore)
     end
 end
 fork(l::LocalStore) = LocalStore(copy(l.map))
-
+function join!{V}(s::LocalStore{V}, s2::LocalStore{V})
+    changed = false
+    for (k,v) in s.map
+        haskey(s2.map, k) || continue
+        newv = join(v, s2.map[k])
+        s.map[k] = newv
+        newv <= v || (changed = true)
+    end
+    for (k,v) in s2.map
+        haskey(s.map, k) && continue
+        changed = true
+        s.map[k] = s2.map[k]
+    end
+    changed
+end
 function eval_assign!{V}(s::LocalStore{V}, name::Symbol, v::V)
     s.map[name] = v
 end
@@ -112,6 +146,9 @@ function linearize!(e, v)
         push!(v,e)
     else
         e.head == :call || error("not a call " * string(e))
+        if isa(e.args[1], TopNode) && e.args[1].name == :box # TODO
+            return linearize!(e.args[3], v)
+        end
         for a in e.args
             linearize!(a, v)
         end
@@ -121,15 +158,15 @@ function linearize!(e, v)
 end
 
 function eval_call!{S,V}(t::Thread{S,V}, f, args...)
-    @show f args
+#    println("call : ", f, args)
     top(V)
 end
 
-function step!{S,V}(t::Thread{S,V})
+function step!{StoreT,V,StateT}(t::Thread{StoreT,V,StateT}, queue::Vector{Thread{StoreT,V,StateT}})
     stmt = t.code.body[t.pc]
     if isa(stmt,LabelNode) || isa(stmt,LineNumberNode) || stmt.head == :line
         t.pc += 1
-        return step!(t)
+        return step!(t,queue)
     end
     TRACE && @show t
     if isempty(t.linear_expr) # new statement
@@ -171,17 +208,20 @@ function step!{S,V}(t::Thread{S,V})
         empty!(t.linear_expr)
         @assert length(t.stack) == 1
         res = pop!(t.stack)
-        @show res
         if stmt.head == :(=)
             eval_assign!(t.store, stmt.args[1], res)
-        elseif stmt.head == :return
+        end
+        if !join!(t.state, t.pc, t.store)
+            t.pc = length(t.code.body)+1
+            return
+        end
+        if stmt.head == :return
             t.retval = res
             t.pc = length(t.code.body)+1
         elseif stmt.head == :gotoifnot
             ft = fork(t)
             ft.pc = t.code.label_pc[stmt.args[2]+1]
-            while !done(ft); step!(ft); end
-            @show ft
+            push!(queue, ft)
         end
         t.pc += 1
     end
@@ -189,25 +229,46 @@ end
 
 Base.done(t::Thread) = t.pc > length(t.code.body)
 
-# TEST
-
-function Pf()
-    x = 3
-    y = 6
-    z = +(x,+(x,y))
+type Scheduler{ThreadT}
+    threads :: Vector{ThreadT}
 end
-@show @code_typed Pf()
+Scheduler(t::Thread) = Scheduler([t])
+Base.done(s::Scheduler) = isempty(s.threads)
+function step!(s::Scheduler)
+    t = s.threads[1]
+    step!(s.threads[1], s.threads)
+    if done(t)
+        shift!(s.threads)
+    end
+end
+function run(s::Scheduler)
+    nstep = 0
+    maxthread = length(s.threads)
+    while !done(s)
+        step!(s)
+        maxthread = max(maxthread, length(s.threads))
+        nstep += 1
+    end
+    nstep, maxthread
+end
+
+# TEST
 
 function F()
     x = 3
     y = 5
     z = -4
     if x > 0
-        y = -3
+        y = 3
+    end
+    while x > 0
+        x = y
     end
 #    z = $(+)(x,$(+)($(*)(x,x),y))
     return y
 end
+
+@show @code_typed F()
 
 function code_from_fun(f)
     ast = code_typed(f, ())[1]
@@ -228,10 +289,16 @@ end
 
 const P = code_typed(F, ())[1].args[3]
 const KOD = code_from_fun(F)#Code(P.args, Set([:x,:y,:z]))
-
-thr = Thread(LocalStore(Sign), Sign, KOD)
-while !done(thr)
-    step!(thr)
+function RUN()
+    state = FunctionState(Array(LocalStore{Sign}, length(KOD.body)+1))
+    thr = Thread(state, LocalStore(Sign), Sign, KOD)
+    sched = Scheduler(thr)
+    stats = run(sched)
+    stats, state
 end
-println("Finished :\n", thr)
+s = nothing
+@time (niter,maxthr), state = RUN()
+Z = @time [RUN()[1] for i=1:1000000]
+println("finished in ", niter, " ", maxthr, " threads :\n", state)
+println(length(Z))
 end
