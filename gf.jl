@@ -113,8 +113,8 @@ end
 stagedfunction bot{Ls}(::Type{Prod{Ls}})
     :(Prod(tuple($([:(bot($T)) for T in Ls]...))))
 end
-istop(x::Prod) = all(istop, x.values)
-isbot(x::Prod) = any(isbot, x.values)
+#istop(x::Prod) = all(istop, x.values)
+#isbot(x::Prod) = any(isbot, x.values)
 function Base.show(io::IO, x::Prod)
     istop(x) && return print(io, "top")
     isbot(x) && return print(io, "bot")
@@ -126,12 +126,24 @@ function Base.show(io::IO, x::Prod)
     end
     print(io, ")")
 end
-function <={Ls}(x::Prod{Ls}, y::Prod{Ls})
+
+#=function <={Ls}(x::Prod{Ls}, y::Prod{Ls})
     all(map(<=, x.values, y.values))
+end=#
+stagedfunction <={Ls}(x::Prod{Ls},y::Prod{Ls})
+    args = [:(<=(x.values[$i],y.values[$i])) for i=1:length(Ls)]
+    :(Prod(tuple($(args...))))
 end
-function join{Ls}(x::Prod{Ls}, y::Prod{Ls})
+
+
+#=function join{Ls}(x::Prod{Ls}, y::Prod{Ls})
     Prod(map(join, x.values, y.values))
+end=#
+stagedfunction join{Ls}(x::Prod{Ls},y::Prod{Ls})
+    args = [:(join(x.values[$i],y.values[$i])) for i=1:length(Ls)]
+    :(Prod(tuple($(args...))))
 end
+
 function <={L,Ls}(x::Prod{Ls},y::L)
     convert(L,x) <= y
 end
@@ -364,7 +376,7 @@ end
 const BITS_INTR = [Base.add_int, Base.sub_int, Base.slt_int, Base.sle_int]
 const BITS_FUNC = [+, -, <, <=]
 
-@inline function eval_call!{S,V}(t::Thread{S,V}, ::Type{Sign}, f, args...)
+function eval_call!{S,V}(t::Thread{S,V}, ::Type{Sign}, f, args...)
     # sign addition
     if f <= Const(Base.add_int)
         all(arg -> arg <= Sign(1)  || arg <= Sign(0), args) && return convert(V,Sign(1))
@@ -384,7 +396,9 @@ const BITS_FUNC = [+, -, <, <=]
 
     top(V)
 end
-function eval_call!(t::Thread, ::Type{Const}, f, args...)
+
+
+function eval_call!(t::Thread, ::Type{Const}, f::Lattice, args::Lattice...)
     # only evaluate when every argument is constant
     cargs = map(a -> convert(Const, a), args)
     any(a -> istop(a), cargs) && return top(Const)
@@ -637,7 +651,8 @@ const StateT = FunctionState{StoreT}
 const ThreadT = Thread{StoreT,ValueT,StateT}
 make_sched(conf) = Scheduler{ThreadT,StateT}(Dict{FunKey,StateT}(),Array(ThreadT,0),conf,Set{Any}())
 end
-@show code_typed(step!,(Analysis.ThreadT,Vector{Analysis.ThreadT},Config))
+#@show code_typed(join, (Analysis.ValueT,Analysis.ValueT))
+#@show code_typed(step!,(Analysis.ThreadT,Vector{Analysis.ThreadT},Config))
 #@show code_typed(eval_local, (Analysis.StoreT,Any))
 #@show code_llvm(top, (Type{Analysis.ValueT},))
 #exit()
@@ -673,13 +688,14 @@ function RUN()
     sched = Analysis.make_sched(Config(:always))
     spawn!(sched, FunKey(RUN, ()), [])
     niter,maxthr = run(sched)
-    println("finished in ", niter, " ", maxthr, " threads :\n",sched)
+#    println("finished in ", niter, " ", maxthr, " threads :\n",sched)
 end
 #@show code_typed(eval_call!, (Analysis.ThreadT,Type{Analysis.ValueT},Analysis.ValueT,Analysis.ValueT,Analysis.ValueT))
 #exit()
 LIM = 1000
 @time RUN()
-@time for i=1:10; RUN(); end
+@profile for i=1:10; RUN(); end
+Base.Profile.print()
 LIM = 30
 #@time RUN()
 #@time (niter,maxthr,ss) = RUN()
