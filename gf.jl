@@ -175,7 +175,7 @@ join{Ls}(p::Prod{Ls},v::Lattice) = join(p,convert(Prod{Ls},v))
 
 # ========== Interpreter
 
-const TRACE = true
+const TRACE = false
 
 type Config
     join_strat :: Symbol
@@ -193,7 +193,13 @@ type Code
     isva :: Bool
 end
 function Base.show(io::IO, c::Code)
-    print(io, "(", c.mod, ".", c.name, " : ", length(c.body), " statements, ", sum([length(l[1]) for l in c.linear_expr])," steps)")
+    ln = c.body[1]
+    if ln.head == :line
+        lns = @sprintf("%s:%d", ln.args[2], ln.args[1])
+    else
+        lns = "???"
+    end
+    print(io, "(", c.mod, ".", c.name, " at ",lns,", ", length(c.body), " statements, ", sum([length(l[1]) for l in c.linear_expr])," steps)")
 end
 abstract State
 type FunState{T} <: State
@@ -217,23 +223,6 @@ function join!(s::FunState, fc::Int, pc::Int, ec::Int, v)
     s.data[fc], s.changed = join!(s.data[fc], v)
 end
 join!(s::FunState,fc::Int,v::Lattice) = join!(s,fc,1,1,v)
-type ProgramState{T} <: State
-    data :: Vector{Vector{T}}
-    changed :: Bool
-end
-ProgramState{T}(::Type{T}) = ProgramState(Array(Vector{T},0), false)
-function ensure_filled!{T}(s::ProgramState{T}, fc::Int, c::Code)
-    @assert fc == length(s.data)+1
-    push!(s.data, T[bot(T) for _ in c.body])
-    nothing
-end
-Base.getindex(s::ProgramState, fc::Int) = s.data[fc]#reduce(join, s.data[fc])#TODO
-Base.getindex(s::ProgramState, fc::Int, pc::Int) = s.data[fc][pc]
-Base.getindex(s::ProgramState, fc::Int, pc::Int, ::Int) = s[fc,pc]
-join!(s::ProgramState, fc::Int, pc::Int, ::Int, v) = join!(s,fc,pc,v)
-function join!{T}(s::ProgramState, fc::Int, pc::Int, v::T)
-    @show s.data[fc][pc], s.changed = join!(s.data[fc][pc], v)
-end
 # fallback for immutable lattices
 function join!(v::Lattice,v2::Lattice)
     j = join(v,v2)
@@ -258,7 +247,6 @@ function Base.getindex{T}(s::ExprState{T}, fc::Int, pc::Int, ec::Int)
 end
 function Base.setindex!{T}(s::ExprState{T}, v::T, fc::Int,pc::Int,ec::Int)
     orig = s[fc,pc,ec]
-    @show v orig
     if !(v <= orig)
         s.data[(fc,pc,ec)] = join(orig, v)
         s.changed = true
@@ -273,20 +261,25 @@ function Base.getindex{T}(s::ExprState{T},fc::Int,pc::Int,ecs::AbstractArray)
     a
 end
 
-type Thread
+type Thread{StateT}
     fc :: Int
     pc :: Int
     ec :: Int
     wait_on :: Union(Thread,Void)
-end
-Thread(f,p,e) = Thread(f,p,e,nothing)
-
-type Scheduler{ValueT,StateT,InitialT}
     state :: StateT
-    initial_state :: FunState{InitialT}
+    initial :: StateT
+    visited :: Set{Int}
+end
+Thread(StateT,f,p,e) = Thread(f,p,e,nothing,bot(StateT),bot(StateT),Set{Int}())
+function init!(t::Thread)
+    t.initial, _ = join!(t.initial, t.state)
+end
+
+type Scheduler{ValueT}
     values :: ExprState{ValueT}
     ret_values :: FunState{ValueT}
     threads :: Vector{Thread}
+    done_threads :: Vector{Thread}
     config :: Config
     visited :: Set{Any}
     funs :: Vector{Code}
@@ -302,23 +295,16 @@ function register_fun!(sched::Scheduler, fcode::Code)
     if fc == 0
         push!(sched.funs, fcode)
         fc = length(sched.funs)
-        ensure_filled!(sched.state, fc, fcode)
         ensure_filled!(sched.values, fc, fcode)
         ensure_filled!(sched.ret_values, fc, fcode)
     end
     fc
 end
 
-#=function Base.show(io::IO,t::Thread)
-    println(io, "abstract thread in ", t.state.code, " at ", t.pc, ":")
-    if !done(t)
-        nstep = length(t.linear_expr)
-        ex = t.state.code.body[t.pc]
-        println(io, "\tevaluating", (nstep > 0 ? " ($(t.ec)/$nstep)" : ""), " : ", ex)
-    else
-        println(io, "\treturned")
-    end
-end=#
+function Base.show(io::IO,t::Thread)
+    println(io, "abstract thread at ",t.fc,":",t.pc,":",t.ec)
+    print(io, t.state)
+end
 
 #=function fork{S,V}(t::Thread{S,V}, pc::Int, queue)
     @assert isempty(t.linear_expr) && isempty(t.stack)
@@ -330,15 +316,29 @@ end=#
     ft = Thread(t.sched,t.state, fork(t.store), [], Array(V,0), pc, 1, bot(V))
     push!(queue, ft)
     end=#
-
-fork(s::Scheduler,t::Thread,pc::Int) = push!(s.threads, Thread(t.fc,pc,1))
+fork(s,t) = fork(s,t,t.pc,t.ec)
+fork(s,t,pc) = fork(s,t,pc,1)
+function fork{S}(s::Scheduler,t::Thread{S},pc::Int,ec::Int)
+    child = Thread(S,t.fc,pc,ec)
+    join!(child.state, t.state)
+    join!(child.initial, t.initial)
+    union!(child.visited, t.visited)
+    push!(s.threads, child)
+    child
+end
 
 immutable LocalStore{V} <: Lattice
     map :: Dict{LocalName,V}
     LocalStore(m::Dict{LocalName,V} = Dict{LocalName,V}()) = new(m)
 end
 bot{V}(::Type{LocalStore{V}}) = LocalStore{V}()
-<={V}(::LocalStore{V},::LocalStore{V}) = error("???")
+function <={V}(s::LocalStore{V},s2::LocalStore{V})
+    for (k,v) in s.map
+        haskey(s2.map, k) || return false
+        s.map[k] <= s2.map[k] || return false
+    end
+    true
+end
 
 function Base.show(io::IO,s::LocalStore)
     println(io, "local store (", length(s.map), ") :")
@@ -378,6 +378,7 @@ end
 function join!{T<:LocalName,V}(s::LocalStore{V}, v::Pair{T,V})
     k = v.first
     val = v.second
+    isbot(val) && return s, false
     if !haskey(s.map, k)
         s.map[k] = val
         return s, true
@@ -405,7 +406,7 @@ eval_call!{V}(t::Thread, ::Type{V}, f, args...) = top(V)
 function spawn!(sched::Scheduler, f :: Function, args...)
 
 end
-function eval_call!{V}(sched::Scheduler, t::Thread, args::V...)
+function eval_call!{S,V}(sched::Scheduler, t::Thread{S}, args::V...)
     any(isbot, args) && return bot(V)
     f = convert(Const,args[1])
     if !istop(f) && (isa(f.v,Function) && isgeneric(f.v) || !isa(f.v,Function) && !isa(f.v,IntrinsicFunction))
@@ -416,29 +417,45 @@ function eval_call!{V}(sched::Scheduler, t::Thread, args::V...)
             args = args[2:end]
         end
         argt = map(a->convert(Ty,a).ty,args)
-        println("Calling gf ", fv, " ", argt)
+#        println("Calling gf ", fv, " ", argt)
         fcode = code(fv, argt)
         if fcode !== false
             fc = register_fun!(sched, fcode)
-            push!(sched.threads, Thread(fc,1,1))
-            t.wait_on = sched.threads[end]
+#            callee = Thread(S,fc,1,1)
+            t.wait_on = Thread(S,fc,1,1)#sched.threads[end]
             narg = length(fcode.args)
             if fcode.isva
                 narg -= 1
                 vargs = args[narg+1:end]
                 args = args[1:narg]
             end
-            length(fcode.args) == length(args) || error("!!")#return bot(V)
+            narg == length(args) || error(@sprintf("Wrong arg count : %s vs %s %s", fcode.args, args, fcode.isva ? "(vararg)" : ""))#return bot(V)
             for i = 1:narg#(argname,arg) in zip(fcode.args, args)
                 argname = fcode.args[i]
                 arg = args[i]
-                eval_assign!(sched.state, t.wait_on, argname, arg)
+                eval_assign!(sched, t.wait_on, argname, arg)
             end
             if fcode.isva
-                tup = eval_call!(sched, t.wait_on, Const(Base.tuple), vargs...)
+                tup = eval_call!(sched, t.wait_on, convert(V,Const(Base.tuple)), vargs...)
                 @assert tup !== nothing
-                eval_assign!(sched.state, t.wait_on, fcode.args[end], tup)
+                eval_assign!(sched, t.wait_on, fcode.args[end], tup)
             end
+            init!(t.wait_on)
+            for ot in sched.done_threads
+                if t.wait_on.initial <= ot.initial
+                    t.wait_on = nothing
+                    return sched.ret_values[ot.fc]
+                end
+            end
+
+            for ot in sched.threads
+                if t.wait_on.initial <= ot.initial
+                    t.wait_on = ot
+#                    println("Reusing : ", t.wait_on.initial, " as ", ot.initial)
+                    return nothing
+                end
+            end
+            push!(sched.threads, t.wait_on)
             return nothing
         else
 #            println("no")
@@ -449,7 +466,6 @@ function eval_call!{V}(sched::Scheduler, t::Thread, args::V...)
     end
 end
 function eval_new!{V}(t::Thread, args::V...)
-    @show args
     any(isbot, args) && return bot(V)
     eval_call!(t, V, meet(top(V), Const(new_fun)), args...)
 end
@@ -546,25 +562,38 @@ function eval_call!(t::Thread, ::Type{Ty}, f, args...)
     top(Ty)
 end
 
-function eval_assign!{V}(st,t,name,res::V)
-    join!(st, t.fc, t.pc, t.ec, name => res)
+function eval_assign!{V}(s,t,name,res::V)
+    t.state, changed = join!(t.state, name => res)
+    if changed
+        empty!(t.visited)
+    end
 end
 
 function step!{V}(sched::Scheduler{V}, t::Thread, conf::Config)
     code = sched.funs[t.fc]
-    state = sched.state[t.fc,t.pc,t.ec]
+#    state = t.state
     values = sched.values
     le = code.linear_expr[t.pc]
-    TRACE && @show t le
+    TRACE && println("Step thread ", t)
+    if t.ec == 1 && t.pc in t.visited
+        t.pc =length(code.body)+1
+        return
+    end
     if t.ec <= length(le[1]) # continue evaluating expr
         e = le[1][t.ec]
         ed = le[2][t.ec]
         res = if t.wait_on != nothing
-            done(sched, t.wait_on) || error("cycle")
-            r = sched.ret_values[t.wait_on.fc]
-            println("wait on finished : ", r)
-            t.wait_on = nothing
-            r
+            if done(sched, t.wait_on)
+                r = sched.ret_values[t.wait_on.fc]
+                t.wait_on = nothing
+                r                
+            else # cycle
+                ft = fork(sched, t)
+                ft.wait_on = t.wait_on
+#                println("fork for cycle")
+                t.wait_on = nothing
+                bot(V)
+            end
         elseif isa(e, Expr)
             if e.head === :call || e.head === :call1 || e.head === :new
                 narg = length(e.args)
@@ -576,7 +605,7 @@ function step!{V}(sched::Scheduler{V}, t::Thread, conf::Config)
                     d == ed+1 && (unshift!(args, values[t.fc,t.pc,i]); unshift!(argex, le[1][i]))
                     i -= 1
                 end
-                @show argex
+#                @show argex
                 if e.head === :new
                     eval_new!(t, args...)
                 else
@@ -589,7 +618,7 @@ function step!{V}(sched::Scheduler{V}, t::Thread, conf::Config)
             if e === :UNKNOWN
                 top(V)
             elseif e in code.locals || isa(e,GenSym)
-                eval_local(state, e)
+                eval_local(t.state, e)
             elseif isa(e,Symbol) && isconst(code.mod,e)
                 eval_lit(V, eval(code.mod,e))
             else
@@ -606,14 +635,14 @@ function step!{V}(sched::Scheduler{V}, t::Thread, conf::Config)
         if res === nothing
             return
         end
-        @show values[t.fc,t.pc,t.ec] = res
+        values[t.fc,t.pc,t.ec] = res
         t.ec += 1
     end;if t.ec > length(le[1]) # TODO think wether we wa
         #    else
         res = values[t.fc,t.pc,t.ec-1]
         t.ec = 1
         stmt = code.body[t.pc]
-        TRACE && @show res
+        TRACE && (print("Result of ");Meta.show_sexpr(stmt);println(" : ", res))
         next_pc = t.pc+1
         branch_pc = next_pc
         if isa(stmt, GotoNode)
@@ -630,18 +659,17 @@ function step!{V}(sched::Scheduler{V}, t::Thread, conf::Config)
                 next_pc = branch_pc
             end
         end
+        push!(t.visited, t.pc)
         if next_pc != branch_pc
             fork(sched, t, branch_pc)
         end
         t.pc = next_pc
         if isa(stmt,Expr) && stmt.head === :(=)
             @assert next_pc == branch_pc
-            println("eval assign : ", stmt.args[1], " = ", res)
-            eval_assign!(sched.state, t, stmt.args[1]::LocalName, res)
+            eval_assign!(sched, t, stmt.args[1]::LocalName, res)
         end
         if done(sched, t)
             join!(sched.ret_values,t.fc,res)
-            @show sched res sched.ret_values[t.fc]
         end
     end
     nothing
@@ -651,44 +679,62 @@ Base.done(s::Scheduler,t::Thread) = t.pc > length(s.funs[t.fc].body)
 Base.done(s::Scheduler) = isempty(s.threads)
 function step!(s::Scheduler)
     n = length(s.threads)
+    while n > 0
+        t = s.threads[n]
+        if t.wait_on == nothing || done(s,t.wait_on)
+            break
+        end
+        n -= 1
+    end
+    if n == 0
+        n = length(s.threads)
+    end
     t = s.threads[n]
     try
-        step!(s, s.threads[n], s.config)
+        step!(s, t, s.config)
     catch x
-        println("Exception while executing ", s.threads[1])
+        println("Exception while executing ", t)
         rethrow(x)
     end
 #=    if s.state.changed
         t.pc = 1
         t.ec = 1
         t.wait_on = nothing
-    else=#if done(s,t) || !(s.state.changed || s.values.changed || t.wait_on != nothing)
+    else=#if done(s,t)# || !(.state.changed || s.values.changed || t.wait_on != nothing)
         t.pc = length(s.funs[t.fc].body) + 1
         deleteat!(s.threads,n)
-        println("THREAD FINISHED ", s.state.changed, "/", s.values.changed, "/", t.wait_on != nothing, " ================")
+        push!(s.done_threads,t)
+        TRACE && println("THREAD FINISHED ", false, "/", s.values.changed, "/", t.wait_on != nothing, " ================")
     end
-    s.state.changed = s.values.changed = false
+#    s.state.changed = s.values.changed = false
 end
 function run(s::Scheduler)
     nstep = 0
     maxthread = length(s.threads)
-    while !done(s)
+    while !done(s) && nstep < LIM
         step!(s)
         maxthread = max(maxthread, length(s.threads))
+        if nstep % 10000 == 0
+            println(s)
+        end
         nstep += 1
     end
     nstep, maxthread
 end
 function Base.show(io::IO, s::Scheduler)
     println(io, "====== scheduler (", length(s.threads), " active threads, ", length(s.funs), " functions):")
-    for t in s.threads
+#=    for t in s.threads
         println(io, "thread ", t)
-    end
+    end=#
+    fcs = [t.fc for t in s.threads]
+    dfcs = [t.fc for t in s.done_threads]
+    nthr = Dict([u => length(findin(fcs,u)) for u in unique(fcs)])
+    dnthr = Dict([u => length(findin(dfcs,u)) for u in unique(dfcs)])
     for (k,v) in enumerate(s.funs)
         println(io, "==== fun ", k, ": ", v)
-        println(io, "return : ", s.ret_values[k])
-        print(io, s.state[k])
-        println(io, "====")
+        println(io, "\treturn : ", s.ret_values[k])
+        println(io, "\t", get(nthr,k,0), " active threads")
+        println(io, "\t", get(dnthr,k,0), " done threads")
     end
     println(io, "======")
 end
@@ -839,15 +885,12 @@ function F()
     y = (x+1)*x
 end
 
+FA(n) = n > 0 ? FA(n-1)+1 : 0
 function F()
-    x = 3
-    if UNKNOWN
-        x =  -3
-    end
-    return x
+    FA(3)
 end
 
-export Prod,Sign,Const,Ty,Birth,LocalStore,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,ProgramState
+export Prod,Sign,Const,Ty,Birth,LocalStore,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState
 
 # == client
 
@@ -855,8 +898,7 @@ module Analysis
 using GreenFairy
 const ValueT = Prod{(Sign,Const,Ty,Birth)}
 const StoreT = LocalStore{ValueT}
-const StateT = ProgramState
-make_sched(conf) = Scheduler(StateT(StoreT),FunState(StoreT),ExprState(ValueT),FunState(ValueT),Array(Thread,0),conf,Set{Any}(),Array(Code,0))
+make_sched(conf) = Scheduler(ExprState(ValueT),FunState(ValueT),Array(Thread,0),Array(Thread,0),conf,Set{Any}(),Array(Code,0))
 end
 #@show code_typed(join, (Analysis.ValueT,Analysis.ValueT))
 #@show code_typed(step!,(Analysis.ThreadT,Vector{Analysis.ThreadT},Config))
@@ -867,19 +909,21 @@ end
 function RUN(F::Function,args::ANY)
     sched = Analysis.make_sched(Config(:always))
     fc = register_fun!(sched, code(F, args))
-    push!(sched.threads, Thread(fc,1,1))
+    push!(sched.threads, Thread(Analysis.StoreT,fc,1,1))
+    init!(sched.threads[1])
     dt = @elapsed begin
         niter,maxthr = run(sched)
     end
     println("Finished in ", niter, " ", maxthr, " threads :\n",sched)
     @printf("Speed %.2f Kit/s for %.2f s\n", (niter/1000)/dt, dt)
     println("Result : ", sched.ret_values[1])
+    sched
 end
 #@show code_typed(eval_call!, (Analysis.ThreadT,Type{Analysis.ValueT},Analysis.ValueT,Analysis.ValueT,Analysis.ValueT))
 #exit()
 DOIT() = RUN(F, ())
+LIM = 100000
 #@time RUN(RUN, (Function,Any))
-#=@profile=# for i=1:2; @time RUN(F, ()); end
 #file for i=1:10; RUN(); end
 #Base.Profile.print()
 #@time RUN()
@@ -888,3 +932,4 @@ DOIT() = RUN(F, ())
 #Z = @time [RUN()[1] for i=1:1000000]
 
 end
+sched = @time GreenFairy.RUN(GreenFairy.DOIT, ())
