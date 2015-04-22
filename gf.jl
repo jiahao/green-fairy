@@ -13,6 +13,21 @@ function show_limit(io::IO, x; limit = 80)
     write(io, takebuf_string(buf))
 end
 show_limit(x; kw...) = show_limit(STDOUT, x; kw...)
+
+typealias LocalName Union(Symbol,GenSym)
+# static data about a function
+type Code
+    mod :: Module
+    name :: Symbol
+    body :: Vector{Any}
+    label_pc :: Vector{Int} # label+1 => pc
+    locals :: Set{LocalName}
+    args :: Vector{Symbol}
+    linear_expr :: Vector{(Vector{Any},Vector{Int})}
+    isva :: Bool
+    tvar_mapping :: Tuple
+end
+
 import Base.convert
 # ========== Lattice stuff
 abstract Lattice
@@ -53,11 +68,11 @@ eval_lit(::Type{Const}, v::ANY) = Const(v)
 
 immutable ConstCode <: TagLattice
     tag :: L3
-    v :: LambdaStaticData
+    v :: Code
     ConstCode(tag::L3) = new(tag)
-    ConstCode(tag::L3,v::LambdaStaticData) = new(tag,v)
+    ConstCode(tag::L3,v::Code) = new(tag,v)
 end
-ConstCode(v::LambdaStaticData) = ConstCode(L3e, v)
+ConstCode(v::Code) = ConstCode(L3e, v)
 top(::Type{ConstCode}) = ConstCode(top(L3))
 bot(::Type{ConstCode}) = ConstCode(bot(L3))
 eval_lit(::Type{ConstCode}, v) = top(ConstCode)
@@ -87,7 +102,7 @@ eval_lit(::Type{Sign}, v::FloatingPoint) = Sign(round(Int, sign(v)))
 # ========== Type
 immutable Ty <: Lattice
     ty :: Type
-    Ty(t::ANY) = new(t)
+    Ty(t::ANY) = isa(t,Tuple) ? new(Base.limit_tuple_type(t)) : new(t)
 end
 top(::Type{Ty}) = Ty(Any)
 bot(::Type{Ty}) = Ty(Union())
@@ -196,7 +211,7 @@ stagedfunction convert{L,Ls}(::Type{Prod{Ls}},y::L)
     args = [i == idx ? :y : :(top($(Ls[i]))) for i=1:length(Ls)]
     :(prod(tuple($(args...))))
 end
-typealias LocalName Union(Symbol,GenSym)
+
 function eval_local(p::Prod,name::LocalName)
     prod(map(v -> eval_local(v, name), p.values))
 end
@@ -210,19 +225,6 @@ const TRACE = false
 type Config
     join_strat :: Symbol
 end
-# static data about a function
-type Code
-    mod :: Module
-    name :: Symbol
-#    f :: Function
-    body :: Vector{Any}
-    label_pc :: Vector{Int} # label+1 => pc
-    locals :: Set{LocalName}
-    args :: Vector{Symbol}
-    linear_expr :: Vector{(Vector{Any},Vector{Int})}
-    isva :: Bool
-    tvar_mapping :: Tuple
-end
 function Base.show(io::IO, c::Code)
     ln = c.body[1]
     if ln.head == :line
@@ -230,7 +232,7 @@ function Base.show(io::IO, c::Code)
     else
         lns = "???"
     end
-    print(io, "(", c.mod, ".", c.name, " at ",lns,", ", length(c.body), " statements, ", sum([length(l[1]) for l in c.linear_expr])," steps)")
+    print(io, "(", module_name(c.mod), ".", c.name, " at ",lns,", ", length(c.body), " statements, ", sum([length(l[1]) for l in c.linear_expr])," steps)")
 end
 abstract State
 type FunState{T} <: State
@@ -564,7 +566,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, args::V...) #TODO 
     else
         ccode = convert(ConstCode, args[1])
         if !istop(ccode)
-            fcode = code_from_ast(Base.uncompressed_ast(ccode.v), :anonymous, Main, ())
+            fcode = ccode.v
             fc = eval_call_code!(sched, t.state, fcode, args[2:end])
             if fc > 0 # TODO remove dupl
                 t.wait_on = fc
@@ -843,7 +845,8 @@ function eval_call!{V}(t::Thread, ::Type{ConstCode}, f::V, args::V...)
         (istop(ty) || ty.v != Function) && return top(V)
         code = convert(Const, args[2])
         istop(code) && return top(V)
-        return convert(V,ConstCode(code.v))
+        actual_code = code_from_ast(code.v, :anonymous, Main, ())
+        return convert(V,ConstCode(actual_code))
     end
     top(V)
 end
@@ -1062,7 +1065,7 @@ function step!(s::Scheduler)
         TRACE && println("THREAD FINISHED ", false, "/", s.values.changed, "/", t.wait_on != nothing, " ================")
     end
 end
-LIM = 1000000
+LIM = 500000
 function run(s::Scheduler)
     nstep = 0
     maxthread = length(s.threads)
@@ -1162,11 +1165,12 @@ function linearize_stmt!(stmt,v,ds)
 end
 
 const _code_cache = Dict{Any,Code}()
-
-function code_from_ast(ast,name,mod,tenv)
-    key = (ast,tenv)
+const SR = []
+function code_from_ast(linf,name,mod,tenv)
+    key = (linf,tenv)
     haskey(_code_cache, key) && return _code_cache[key]
     TRACE && @show ast
+    ast = Base.uncompressed_ast(linf)
     body = ast.args[3].args
     label_pc = Array(Int, 0)
     for pc = 1:length(body)
@@ -1218,8 +1222,7 @@ function code(f::Function,argtypes::ANY)
     if meth.isstaged
         func = ccall(:jl_instantiate_staged, Any,(Any,Any,Any), meth, argtypes, tenv)
     end
-    ast = Base.uncompressed_ast(func.code)
-    c = code_from_ast(ast, f.env.name, meth.func.code.module, tenv)
+    c = code_from_ast(func.code, f.env.name, meth.func.code.module, tenv)
     c
 end
 
