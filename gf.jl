@@ -29,8 +29,19 @@ bot(::Type{L3}) = L3(-1 % Int8)
 <=(x::L3,y::L3) = x.v <= y.v
 Base.show(io::IO, x::L3) = print(io, istop(x) ? "top" : isbot(x) ? "bot" : "L3.e")
 
+abstract TagLattice <: Lattice
+istop(x::TagLattice) = istop(x.tag)
+isbot(x::TagLattice) = isbot(x.tag)
+Base.show(io::IO, x::TagLattice) = (istop(x) | isbot(x)) ? show(io, x.tag) : (print(io, "const(");show_limit(io,x.v);print(io,")"))
+<=(x::TagLattice,y::TagLattice) = (istop(y) || isbot(x) || x.tag == y.tag == L3e && y.v===x.v)
+function join(x::TagLattice,y::TagLattice)
+    x <= y && return y
+    y <= x && return x
+    top(Const)
+end
+
 # ========== Const
-immutable Const <: Lattice
+immutable Const <: TagLattice
     tag :: L3
     v :: Any
     Const(tag::L3,v::ANY) = new(tag,v)
@@ -38,16 +49,18 @@ end
 Const(v::ANY) = Const(L3e, v)
 top(::Type{Const}) = Const(top(L3), ())
 bot(::Type{Const}) = Const(bot(L3), ())
-istop(x::Const) = istop(x.tag)
-isbot(x::Const) = isbot(x.tag)
-Base.show(io::IO, x::Const) = (istop(x) | isbot(x)) ? show(io, x.tag) : (print(io, "const(");show_limit(io,x.v);print(io,")"))
-<=(x::Const,y::Const) = (istop(y) || isbot(x) || x.tag == y.tag == L3e && y.v===x.v)
-function join(x::Const,y::Const)
-    x <= y && return y
-    y <= x && return x
-    top(Const)
-end
 eval_lit(::Type{Const}, v::ANY) = Const(v)
+
+immutable ConstCode <: TagLattice
+    tag :: L3
+    v :: LambdaStaticData
+    ConstCode(tag::L3) = new(tag)
+    ConstCode(tag::L3,v::LambdaStaticData) = new(tag,v)
+end
+ConstCode(v::LambdaStaticData) = ConstCode(L3e, v)
+top(::Type{ConstCode}) = ConstCode(top(L3))
+bot(::Type{ConstCode}) = ConstCode(bot(L3))
+eval_lit(::Type{ConstCode}, v) = top(ConstCode)
 
 # ========== Sign
 immutable Sign <: Lattice
@@ -201,7 +214,7 @@ end
 type Code
     mod :: Module
     name :: Symbol
-    f :: Function
+#    f :: Function
     body :: Vector{Any}
     label_pc :: Vector{Int} # label+1 => pc
     locals :: Set{LocalName}
@@ -425,6 +438,7 @@ const new_array = :new_array_tag
 const new_array_1d = :new_array_1d_tag
 const new_array_2d = :new_array_2d_tag
 const new_array_3d = :new_array_3d_tag
+const new_closure = :new_closure_tag
 end
 
 
@@ -432,12 +446,12 @@ end
 eval_call!{V}(t::Thread, ::Type{V}, f, args...) = top(V)
 
 call_gate{T<:Lattice}(v::T) = top(T)
-call_gate(v::Const) = isa(v.v, Type) ? v : top(Const) # keep constant types for metaprogramming
+call_gate(v::Const) = isa(v.v, Type)? v : top(Const) # keep constant types for metaprogramming
 call_gate(v::Union(Sign,Ty,Birth)) = v
+call_gate(v::ConstCode) = v
 call_gate(p::Prod) = prod(map(call_gate,p.values))
 NOMETH = 0
 function eval_call_gf!{V,S,I,F}(sched::Scheduler{V,S,I,F}, state, fv, args)
-    global NOMETH
     argt = map(args) do a
         ca = convert(Const,a)
         if !istop(ca) && isa(ca.v, Type)
@@ -447,64 +461,84 @@ function eval_call_gf!{V,S,I,F}(sched::Scheduler{V,S,I,F}, state, fv, args)
         end
     end
     fcode = code(fv, argt)
-    if fcode !== false
-        #            fc = register_fun!(sched, fcode)
-        child = Thread(S,F,0,1,1)
-        child.state, _ = join!(child.state, state)
-        child.state = call_gate!(child.state)
-        args = map(call_gate, args)
-        if any(istop, args)
-            #                println("Calling gf ", fv, " ", argt, " with args ", args)
-            #                println(sched)
-            #                exit()
-        end
-        narg = length(fcode.args)
-        if fcode.isva
-            narg -= 1
-            vargs = args[narg+1:end]
-            args = args[1:narg]
-        end
-        narg == length(args) || error(@sprintf("Wrong arg count : %s vs %s%s", fcode.args, args, fcode.isva ? " (vararg)" : ""))#return bot(V)
-        for i = 1:narg
-            argname = fcode.args[i]
-            arg = args[i]
-            eval_assign!(sched, child, argname, arg)
-        end
-        if fcode.isva
-            tup = eval_call!(sched, child, convert(V,Const(Base.tuple)), vargs...)
-            @assert tup !== nothing
-            eval_assign!(sched, child, fcode.args[end], tup)
-        end
-        for i=1:2:length(fcode.tvar_mapping)
-            tv = fcode.tvar_mapping[i]
-            tval = fcode.tvar_mapping[i+1]
-            eval_assign!(sched, child, tv.name, convert(V,Const(tval)))
-        end
-        for fc in 1:length(sched.funs)
-            if sched.funs[fc] === fcode && child.state <= sched.initial[fc]
-                return fc
-            end
-        end
-        fc = register_fun!(sched, fcode)
-        child.fc = fc
-        join!(sched.initial, fc, child.state)
-        push!(sched.threads, child)
-        fc
+    if fcode === false # TODO fix this interface
+        -1
+    elseif isa(fcode, Code)
+        eval_call_code!(sched, state, fcode, args)
     else
-        NOMETH += 1
-        #=            println("no : ", fv, " ", argt, " ", args)
-        println(t)
-        println(sched)
-        exit()=#
+        #println("no ", fcode, " ", fv, " ", args)
         0
     end
 end
+function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args)    
+    #            fc = register_fun!(sched, fcode)
+    child = Thread(S,F,0,1,1)
+    child.state, _ = join!(child.state, state)
+    child.state = call_gate!(child.state)
+    args = map(call_gate, args)
+    if any(istop, args)
+        #                println("Calling gf ", fv, " ", argt, " with args ", args)
+        #                println(sched)
+        #                exit()
+    end
+    narg = length(fcode.args)
+    if fcode.isva
+        narg -= 1
+        vargs = args[narg+1:end]
+        args = args[1:narg]
+    end
+    narg == length(args) || error(@sprintf("Wrong arg count : %s vs %s%s", fcode.args, args, fcode.isva ? " (vararg)" : ""))#return bot(V)
+    for i = 1:narg
+        argname = fcode.args[i]
+        arg = args[i]
+        eval_assign!(sched, child, argname, arg)
+    end
+    if fcode.isva
+        tup = eval_call!(sched, child, convert(V,Const(Base.tuple)), vargs...)
+        @assert tup !== nothing
+        eval_assign!(sched, child, fcode.args[end], tup)
+    end
+    for i=1:2:length(fcode.tvar_mapping)
+        tv = fcode.tvar_mapping[i]
+        tval = fcode.tvar_mapping[i+1]
+        eval_assign!(sched, child, tv.name, convert(V,Const(tval)))
+    end
+    for fc in 1:length(sched.funs)
+        if sched.funs[fc] === fcode && child.state <= sched.initial[fc]
+            return fc
+        end
+    end
+    fc = register_fun!(sched, fcode)
+    child.fc = fc
+    join!(sched.initial, fc, child.state)
+    push!(sched.threads, child)
+    fc
+end
 
-function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, args::V...)
+function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, args::V...) #TODO move args to an ANY tuple to avoid recompilation
     any(isbot, args) && (#=println("bot arg ", args); =#return bot(V))
     f = convert(Const,args[1])
     if f <= Const(Base._apply)
-#        error("Apply todo")
+        actual_args = []
+        if args[3] <= Ty(Function)
+            f = args[3]
+        else
+            f = args[2]
+            push!(actual_args, args[3])
+        end
+        for i=4:length(args)
+            if args[i] <= Ty(Tuple)
+                l = convert(Const, eval_call!(t, V, convert(V,Const(Base.tuplelen)), args[i]))
+                istop(l) && return top(V)
+                for k=1:l.v
+                    push!(actual_args, eval_call!(t, V, convert(V,Const(Base.tupleref)), args[i], convert(V,l)))
+                end
+            else # TODO handle other iterators
+                return top(V)
+            end
+        end
+        f = convert(Const,f)
+        args = tuple(convert(V,f), actual_args...)
     end
     if !istop(f) && (isa(f.v,Function) && isgeneric(f.v) || !isa(f.v,Function) && !isa(f.v,IntrinsicFunction))
         fv = f.v
@@ -516,8 +550,10 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, args::V...)
         fc = eval_call_gf!(sched, t.state, fv, args)
         if fc > 0
             t.wait_on = fc
-            push!(sched.called_by[fc], t.fc)
+            push!(sched.called_by[fc], (t.fc,t.pc))
             nothing
+        elseif fc == -1
+            bot(V)
         else
             top(V)
         end
@@ -526,17 +562,30 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, args::V...)
         t.final.must_throw = true
         bot(V)
     else
-        # canonicalize known ccalls
-        if f <= Const(Base.ccall)
-            # TODO add rethrow here instead of hijacking Base.rethrow
-            fun = # TODO make this less ugly
+        ccode = convert(ConstCode, args[1])
+        if !istop(ccode)
+            fcode = code_from_ast(Base.uncompressed_ast(ccode.v), :anonymous, Main, ())
+            fc = eval_call_code!(sched, t.state, fcode, args[2:end])
+            if fc > 0 # TODO remove dupl
+                t.wait_on = fc
+                push!(sched.called_by[fc], (t.fc,t.pc))
+                nothing
+            else
+                top(V)
+            end
+        else
+            # canonicalize known ccalls
+            if f <= Const(Base.ccall)
+                # TODO add rethrow here instead of hijacking Base.rethrow
+                fun = # TODO make this less ugly
                 (args[2] <= Const(:jl_new_array) ? OtherBuiltins.new_array :
                  args[2] <= Const(:jl_alloc_array_1d) ? OtherBuiltins.new_array_1d :
                  args[2] <= Const(:jl_alloc_array_2d) ? OtherBuiltins.new_array_2d :
                  args[2] <= Const(:jl_alloc_array_3d) ? OtherBuiltins.new_array_3d : nothing)
-            fun === nothing || (args = tuple(convert(V,Const(fun)), args[5:end]...))
+                fun === nothing || (args = tuple(convert(V,Const(fun)), args[5:end]...))
+            end
+            eval_call!(t, V, args...)
         end
-        eval_call!(t, V, args...)
     end
 end
 
@@ -554,10 +603,13 @@ stagedfunction eval_call!{Ls}(t::Thread, ::Type{Prod{Ls}}, f::Prod{Ls}, args::Pr
 end
 #TODO rename this as const_funs or sthing
 # TODO add intrinsics that can throw
-const BITS_INTR = [Base.add_int, Base.sub_int, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.slt_int, Base.sle_int, Base.not_int,Base.apply_type, Base.issubtype]
-const BITS_FUNC = [+, -, *, %, leading_zeros, <, <=, !, Base.apply_type, Base.issubtype]
+const BITS_INTR = [Base.add_int, Base.sub_int, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.slt_int, Base.sle_int, Base.not_int,Base.apply_type, Base.issubtype, Base.tuple, Base.tuplelen, Base.tupleref, Core.sizeof]
+const BITS_FUNC = [+, -, *, %, leading_zeros, <, <=, !, Base.apply_type, Base.issubtype, Base.tuple, Base.tuplelen, Base.tupleref, Core.sizeof]
 
 function eval_call!{V}(t::Thread, ::Type{Sign}, f::V, args::V...)
+    if (f <= Const(Base.unbox) || f <= Const(Base.box))
+        return convert(V,convert(Sign,args[2]))
+    end
     # sign add
     if f <= Const(Base.add_int) || f <= Const(Base.checked_sadd)
         length(args) == 2 || return bot(V)
@@ -592,17 +644,23 @@ function eval_call!{V}(t::Thread, ::Type{Sign}, f::V, args::V...)
 end
 
 const INTR_TYPES = [
-                    (Int, [Base.add_int, Base.sub_int,Base.check_top_bit, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.ashr_int, Base.checked_ssub, Base.checked_sadd])
+                    (Int, [Base.add_int, Base.sub_int,Base.check_top_bit, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.ashr_int, Base.checked_ssub, Base.checked_sadd, Base.and_int, Base.flipsign_int, Base.shl_int, Base.lshr_int, Base.xor_int, Base.and_int, Base.neg_int, Base.or_int, Base.sdiv_int, Base.cttz_int, Core.sizeof]),
+                    (UInt, [Base.udiv_int, Base.urem_int]),
+                    (Float64, [Base.div_float, Base.mul_float, Base.ceil_llvm, Base.sub_float, Base.neg_float]),
+                    (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float])
                     ]
-const BOOL_INTR = [Base.slt_int, Base.sle_int, Base.not_int, Base.is]
-
+const FA_INTR = [Base.trunc_int, Base.sext_int, Base.uitofp, Base.sitofp, Base.fptosi, Base.box, Base.unbox, OtherBuiltins.new]
 
 function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
-    if f <= Const(OtherBuiltins.new) && length(args) >= 1
-        cty = convert(Const, args[1])
-        istop(cty) && return top(V)
-        return convert(V, Ty(cty.v))
-    end    
+    if length(args) >= 1
+        for bf in FA_INTR
+            if f <= Const(bf)
+                cty = convert(Const, args[1])
+                istop(cty) && return top(V)
+                return convert(V, Ty(cty.v))
+            end
+        end
+    end
     if  f <= Const(OtherBuiltins.new_array) ||
         f <= Const(OtherBuiltins.new_array_1d) ||
         f <= Const(OtherBuiltins.new_array_2d) ||
@@ -619,11 +677,6 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
             end
         end
     end
-    for bf in BOOL_INTR
-        if f <= Const(bf)
-            return convert(V,Ty(Bool))
-        end
-    end
     if f <= Const(Base.select_value)
         return convert(V,reduce(join, args[2:end]))
     end
@@ -635,13 +688,17 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
         # TODO rebase on top of new tuple types
         return convert(V,Ty(map(a->a.ty,argtypes)))
     end
-    if f <= Const(Base.arraylen)
+    if f <= Const(Base.arraylen) || f <= Const(Base.arraysize)
         argtypes[1] <= Ty(Array) || return bot(V)
         return convert(V, Ty(Int))
     end
     if f <= Const(Base.tuplelen)
         argtypes[1] <= Ty(Tuple) || return bot(V)
-        return convert(V, Ty(Int))
+        tty = argtypes[1].ty
+        len = length(tty)
+        len == 0 && return convert(V,Const(0))
+        tty[end] <: Vararg && return convert(V,Ty(Int))
+        return convert(V, Const(len))
     end
     if f <= Const(Base.getfield)
         aty = argtypes[1].ty
@@ -702,6 +759,18 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
         argtypes[1] <= Ty(Array) || return top(V)
         return convert(V,Ty(argtypes[1].ty.parameters[1]))
     end
+    if f <= Const(Base.arrayset)
+        argtypes[1] <= Ty(Array) || return top(V)
+        return convert(V,argtypes[1])
+    end
+    if f <= Const(Base.isa)
+        cty = convert(Const,args[2])
+        istop(cty) && return top(V)
+        isa_ty = Ty(cty.v)
+        argtypes[1] <= isa_ty && return convert(V, Const(true))
+        isbot(meet(argtypes[1], isa_ty)) && return convert(V, Const(false))
+        return convert(V, Ty(Bool))
+    end
     if f <= Ty(IntrinsicFunction)
         cv = convert(Const,f).v
         intrname = string(cv)
@@ -725,7 +794,14 @@ function eval_call!{V}(t::Thread, ::Type{Const}, f::V, args::V...)
     # bits functions
     for (bf,rf) in zip(BITS_INTR,BITS_FUNC)
         if f <= Const(bf)
-            return convert(V,Const(rf(map(a -> a.v, cargs)...)))
+            argvals = map(a -> a.v, cargs)
+            res = bot(Const)
+            try
+                res = Const(rf(argvals...))
+            catch
+                warn("thrown calling ", f, " ", argvals)
+            end
+            return convert(V,res)
         end
     end
 
@@ -751,15 +827,25 @@ function eval_call!{V}(t::Thread, ::Type{Const}, f::V, args::V...)
 
     top(V)
 end
-function eval_call!(t::Thread, ::Type{Birth}, f, args...)
+function eval_call!{V}(t::Thread, ::Type{Birth}, f::V, args::V...)
     if  f <= Const(OtherBuiltins.new) ||
         f <= Const(OtherBuiltins.new_array) ||
         f <= Const(OtherBuiltins.new_array_1d) ||
         f <= Const(OtherBuiltins.new_array_2d) ||
         f <= Const(OtherBuiltins.new_array_3d)
-        return Birth(t.fc,t.pc, t.ec)
+        return convert(V,Birth(t.fc,t.pc, t.ec))
     end
-    top(Birth)
+    top(V)
+end
+function eval_call!{V}(t::Thread, ::Type{ConstCode}, f::V, args::V...)
+    if f <= Const(OtherBuiltins.new)
+        ty = convert(Const, args[1])
+        (istop(ty) || ty.v != Function) && return top(V)
+        code = convert(Const, args[2])
+        istop(code) && return top(V)
+        return convert(V,ConstCode(code.v))
+    end
+    top(V)
 end
 
 function eval_assign!{V}(s,t,name,res::V)
@@ -828,6 +914,8 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
             else
                 top(V) # global
             end
+        elseif isa(e, LambdaStaticData)
+            eval_new!(t, convert(V,Const(Function)), convert(V,Const(e)))
         else
             if isa(e, TopNode)
                 e = eval(Base,e.name)
@@ -937,6 +1025,8 @@ function step!(s::Scheduler)
     catch x
         println("Exception while executing ", t)
         println("Function : ", s.funs[t.fc])
+        read(STDIN, Char)
+        println(s)
         rethrow(x)
     end
 #=    if s.state.changed
@@ -997,10 +1087,15 @@ function Base.show(io::IO, s::Scheduler)
     nthr = Dict([u => length(findin(fcs,u)) for u in unique(fcs)])
     dnthr = Dict([u => length(findin(dfcs,u)) for u in unique(dfcs)])
     for (k,v) in enumerate(s.funs)
-#        get(nthr,k,0) > 0 || continue
+        #        get(nthr,k,0) > 0 || continue
+        #if !istop(s.final[k].ret_val); continue; end
         println(io, "==== fun ", k, ": ", v)
         println(io, "threads : ", get(nthr,k,0), " active, ", get(dnthr,k,0), " done")
-        println(io, "called by : ", s.called_by[k])
+        callers = map(cfc -> (s.funs[cfc[1]], cfc[2]), collect(s.called_by[k]))
+        println(io, "called by : ")
+        for (fun, pc) in callers
+            println(io, "\t- ", fun, " at ", pc)
+        end
         println(io, "final : ", s.final[k])
         println(io, "initial : ", s.initial[k])
     end
@@ -1031,10 +1126,10 @@ function linearize!(e,v,ds,d)
             push!(v, :UNKNOWN)
             push!(ds,d)
             return v,ds
-        elseif isa(e.args[1], TopNode) && e.args[1].name in (:box,:unbox) ||# TODO
+        #=elseif isa(e.args[1], TopNode) && e.args[1].name in (:box,:unbox) ||# TODO
             e.args[1] in (:box,:unbox)
             linearize!(e.args[3], v, ds, d)
-            return v,ds
+            return v,ds=#
         end
         for a in e.args
             linearize!(a, v, ds, d+1)
@@ -1065,7 +1160,12 @@ function linearize_stmt!(stmt,v,ds)
     end
     v,ds
 end
-function code_from_ast(f,ast,name,mod)
+
+const _code_cache = Dict{Any,Code}()
+
+function code_from_ast(ast,name,mod,tenv)
+    key = (ast,tenv)
+    haskey(_code_cache, key) && return _code_cache[key]
     TRACE && @show ast
     body = ast.args[3].args
     label_pc = Array(Int, 0)
@@ -1081,8 +1181,8 @@ function code_from_ast(f,ast,name,mod)
     locs = Set{LocalName}(ast.args[2][1])
     isva = false
     args = map(ast.args[1]) do a
-        if isa(a, Expr) && a.head == :(::)
-            if eval(a.args[2]) <: Vararg
+        if isa(a, Expr) && a.head == :(::) # TODO ugh
+            if isa(a.args[2],Expr) && a.args[2].head === :call && a.args[2].args[1] === TopNode(:apply_type) && a.args[2].args[2] === :Vararg
                 isva = true
             end
             a.args[1]
@@ -1094,33 +1194,33 @@ function code_from_ast(f,ast,name,mod)
         end
     end
     union!(locs,args)
-    push!(locs, :the_exception)
+    push!(locs, :the_exception) #TODO ugh
     lin = [linearize_stmt!(e,[],Int[]) for e in body]
-    Code(mod, name, f, body, label_pc, locs, args, lin, isva, ())
+    c = Code(mod, name, body, label_pc, locs, args, lin, isva, tenv)
+    for i=1:2:length(tenv)
+        push!(c.locals, tenv[i].name)
+    end
+    _code_cache[key] = c
+    c
 end
 
-const _code_cache = Dict{Any,Code}()
-
 function code(f::Function,argtypes::ANY)
-    key = (f,argtypes)
-    if !haskey(_code_cache, key)
-        meths = Base._methods(f,argtypes, 1)
-        meths !== false && length(meths) > 0 || return false # TODO handle no method error
-        meth = meths[1][3]
-        func = meth.func
-        tenv = meths[1][2]
-        if meth.isstaged
-            func = ccall(:jl_instantiate_staged, Any,(Any,Any,Any), meth, argtypes, tenv)
-        end
-        ast = Base.uncompressed_ast(func.code)
-        c = code_from_ast(f, ast, f.env.name, meth.func.code.module) 
-        for i=1:2:length(tenv)
-            push!(c.locals, tenv[i].name)
-        end
-        c.tvar_mapping = tenv
-        _code_cache[key] = c
+    meths = Base._methods(f,argtypes, -1)
+    if meths === false || length(meths) > 1
+        return length(meths)
     end
-    _code_cache[key]
+    if length(meths) == 0
+        return false
+    end
+    meth = meths[1][3]
+    func = meth.func
+    tenv = meths[1][2]
+    if meth.isstaged
+        func = ccall(:jl_instantiate_staged, Any,(Any,Any,Any), meth, argtypes, tenv)
+    end
+    ast = Base.uncompressed_ast(func.code)
+    c = code_from_ast(ast, f.env.name, meth.func.code.module, tenv)
+    c
 end
 
 function displayfun(s::Scheduler, fc::Int)
@@ -1208,13 +1308,13 @@ function join!{V}(s::ThreadState{V}, s2::ThreadState{V})
     s, chg
 end
 
-export Prod,Sign,Const,Ty,Birth,LocalStore,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ThreadState
+export Prod,Sign,Const,Ty,Birth,LocalStore,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ThreadState,ConstCode
 
 # == client
 
 module Analysis
 using GreenFairy
-const ValueT = Prod{(Sign,Const,Ty,Birth)}
+const ValueT = Prod{(Const,Ty,Sign,Birth,ConstCode)}
 const StateT = ThreadState{LocalStore{ValueT}}
 const FinalT = FinalState{ValueT}
 make_sched(conf) = Scheduler(ExprState(ValueT),FunState(StateT),FunState(FinalT),Array(Bool,0),Array(Thread{StateT,FinalT},0),Array(Thread{StateT,FinalT},0),conf,Array(Set{Any},0),Array(Code,0))
