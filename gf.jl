@@ -1,3 +1,12 @@
+#= TODO
+- find a common interface for mutable state (Final,Thread, ...)
+- make dispatch pluggable with abstract values (ConstCode & Ty)
+  (then add uncertain matches)
+- better "visited" (keyed state, what about non increasing state)
+
+- better representation of the Expr tree (wait for the bytecode ?)
+=#
+
 module GreenFairy
 
 const _ELLIPS = "..."
@@ -478,7 +487,6 @@ function eval_call_gf!{V,S,I,F}(sched::Scheduler{V,S,I,F}, state, fv, args)
     end
 end
 function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args,env)
-    #            fc = register_fun!(sched, fcode)
     child = Thread(S,F,0,1,1)
     child.state, _ = join!(child.state, state)
     child.state = call_gate!(child.state)
@@ -494,7 +502,10 @@ function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args,env
         vargs = args[narg+1:end]
         args = args[1:narg]
     end
-    narg == length(args) || error(@sprintf("Wrong arg count : %s vs %s%s", fcode.args, args, fcode.isva ? " (vararg)" : ""))#return bot(V)
+    if narg != length(args)
+        warn(@sprintf("Wrong arg count : %s vs %s%s", fcode.args, args, fcode.isva ? " (vararg)" : ""))
+        return bot(V)
+    end
     for i = 1:narg
         argname = fcode.args[i]
         arg = args[i]
