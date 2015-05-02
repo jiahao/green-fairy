@@ -1,10 +1,14 @@
 #= TODO
-- find a common interface for mutable state (Final,Thread, ...)
 - make dispatch pluggable with abstract values (ConstCode & Ty)
   (then add uncertain matches)
-- better "visited" (keyed state, what about non increasing state)
+- unify generic & anonymous call path (and support capt. vars in generic code)
+- find a common interface for mutable state (Final,Thread,...)
+- better "visited" (keyed state, what about non increasing state i.e. strong update)
 
 - better representation of the Expr tree (wait for the bytecode ?)
+- think about on-the-fly code mutation (inlining, actual constprop, ...)
+
+- think about implementing type_goto
 =#
 
 module GreenFairy
@@ -482,7 +486,7 @@ function eval_call_gf!{V,S,I,F}(sched::Scheduler{V,S,I,F}, state, fv, args)
     else
         global NOMETH
         NOMETH += 1
-        println("no ", fcode, " ", fv, " ", args)
+        #println("no ", fcode, " ", fv, " ", args)
         0
     end
 end
@@ -509,6 +513,10 @@ function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args,env
     for i = 1:narg
         argname = fcode.args[i]
         arg = args[i]
+        if haskey(fcode.decl_types, argname)
+            cty = convert(Const,eval_sym(sched, state, fcode, fcode.decl_types[argname]))
+            istop(cty) || (arg = meet(arg, convert(V,Ty(cty.v))))
+        end
         eval_assign!(sched, child, argname, arg)
     end
     if fcode.isva
@@ -587,7 +595,6 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, fun::V, args::V...
         if !istop(ccode)
             fcode = ccode.v
             env = ccode.env
-            println("Calling const code env : ", env)
             fc = eval_call_code!(sched, t.state, fcode, args, env)
             if fc > 0 # TODO remove dupl
                 t.wait_on = fc
@@ -610,7 +617,11 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, fun::V, args::V...
                     fun = convert(V, known_ccall)
                 end
             end
-            eval_call!(t, V, fun, args...)
+            result = eval_call!(t, V, fun, args...)
+            #=if !istop(convert(Const, fun)) && istop(result) && !any(istop, args)
+                warn(@sprintf("Top result for %s %s", fun, args))
+            end=#
+            result
         end
     end
 end
@@ -629,9 +640,9 @@ stagedfunction eval_call!{Ls}(t::Thread, ::Type{Prod{Ls}}, f::Prod{Ls}, args::Pr
 end
 #TODO rename this as const_funs or sthing
 # TODO add intrinsics that can throw
-const BITS_INTR = [Base.add_int, Base.sub_int, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.slt_int, Base.sle_int, Base.not_int,Base.apply_type, Base.issubtype, Base.tuple, Base.tuplelen, Base.tupleref, Core.sizeof]
-const BITS_FUNC = [+, -, *, %, leading_zeros, <, <=, !, Base.apply_type, Base.issubtype, Base.tuple, Base.tuplelen, Base.tupleref, Core.sizeof]
-
+const BITS_INTR = [Base.add_int, Base.sub_int, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.slt_int, Base.sle_int, Base.not_int,Base.apply_type, Base.issubtype, Base.tuple, Base.tuplelen, Base.tupleref, Core.sizeof, Base.fieldtype, Base.Union]
+const BITS_FUNC = [+, -, *, %, leading_zeros, <, <=, !, Base.apply_type, Base.issubtype, Base.tuple, Base.tuplelen, Base.tupleref, Core.sizeof, Base.fieldtype, Base.Union]
+@assert length(BITS_INTR) == length(BITS_FUNC)
 function eval_call!{V}(t::Thread, ::Type{Sign}, f::V, args::V...)
     if (f <= Const(Base.unbox) || f <= Const(Base.box))
         return convert(V,convert(Sign,args[2]))
@@ -747,6 +758,10 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
         end
         1 <= fidx <= length(aty.types) || return bot(V)
         return convert(V, Ty(aty.types[fidx]))
+    end
+    if f <= Const(Base.setfield!)
+        # TODO return bot for wrong fields
+        return args[3]
     end
     # first argument is return type
     if  f <= Const(Base.checked_trunc_uint) ||
@@ -891,6 +906,16 @@ function eval_assign!{V}(s,t,name,res::V)
     nothing
 end
 
+function eval_sym {V}(sched::Scheduler{V},state,code,e)
+    if e in code.locals || isa(e,GenSym)
+        eval_local(state, e)
+    elseif isa(e,Symbol) && isconst(code.mod,e)
+        eval_lit(V, eval(code.mod,e))
+    else
+        top(V) # global
+    end
+end
+
 function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
     code = sched.funs[t.fc]
     values = sched.values
@@ -942,12 +967,8 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
         elseif isa(e, LocalName)
             if e === :UNKNOWN
                 top(V)
-            elseif e in code.locals || isa(e,GenSym)
-                eval_local(t.state, e)
-            elseif isa(e,Symbol) && isconst(code.mod,e)
-                eval_lit(V, eval(code.mod,e))
             else
-                top(V) # global
+                eval_sym(sched, t.state, code, e)
             end
         elseif isa(e, LambdaStaticData)
             # canonicalize static AST into : new(Function, ast)
@@ -1205,7 +1226,7 @@ function code_from_ast(linf,tenv)
     key = (linf,tenv)
     haskey(_code_cache, key) && return _code_cache[key]
     TRACE && @show ast
-    name = linf.name
+    fun_name = linf.name
     mod = linf.module
     ast = Base.uncompressed_ast(linf)
     body = ast.args[3].args
@@ -1254,7 +1275,7 @@ function code_from_ast(linf,tenv)
     union!(locs,capt)
     push!(locs, :the_exception) #TODO ugh
     lin = [linearize_stmt!(e,[],Int[]) for e in body]
-    c = Code(mod, name, body, label_pc, locs, args, lin, isva, tenv, capt, decltypes)
+    c = Code(mod, fun_name, body, label_pc, locs, args, lin, isva, tenv, capt, decltypes)
     for i=1:2:length(tenv)
         push!(c.locals, tenv[i].name)
     end
