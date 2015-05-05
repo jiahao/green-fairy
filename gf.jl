@@ -20,8 +20,9 @@
 
 - better representation of the Expr tree (wait for the bytecode ?)
 - think about on-the-fly code mutation (inlining, actual constprop, ...)
+  - would be super cool : figure out that a pc has converged before all its succ (reverse preorder), compute inlining cost model, inline, continue without invalidating any inference data
 
-- think about implementing type_goto
+- think about implementing type_goto :-(
 
 =#
 
@@ -545,6 +546,7 @@ function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args,env
         if haskey(fcode.decl_types, argname)
             declty = fcode.decl_types[argname]
             if isa(declty,Type) # TODO handle typevars here (and everywhere ?)
+                # also should convert Type{A} to meet(Const(A),DataType)
                 arg = meet(arg, convert(V,Ty(declty)))
             end
         end
@@ -732,11 +734,11 @@ function intrinsic_name(cv)
     intrname
 end
 
-# TODO make this correct, add exception info
+# TODO make this correct (float types etc), add exception info
 const INTR_TYPES = [
-                    (Int, [Base.add_int, Base.sub_int,Base.check_top_bit, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.ashr_int, Base.checked_ssub, Base.checked_sadd, Base.and_int, Base.flipsign_int, Base.shl_int, Base.lshr_int, Base.xor_int, Base.and_int, Base.neg_int, Base.or_int, Base.sdiv_int, Base.cttz_int, Core.sizeof]),
+                    (Int, [Base.add_int, Base.sub_int,Base.check_top_bit, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.ashr_int, Base.checked_ssub, Base.checked_sadd, Base.and_int, Base.flipsign_int, Base.shl_int, Base.lshr_int, Base.xor_int, Base.and_int, Base.neg_int, Base.or_int, Base.sdiv_int, Base.cttz_int, Core.sizeof, Base.rint_llvm]),
                     (UInt, [Base.udiv_int, Base.urem_int]),
-                    (Float64, [Base.add_float, Base.div_float, Base.mul_float, Base.ceil_llvm, Base.sub_float, Base.neg_float, Base.abs_float]),
+                    (Float64, [Base.add_float, Base.div_float, Base.mul_float, Base.ceil_llvm, Base.sub_float, Base.neg_float, Base.abs_float, Base.sqrt_llvm]),
                     (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float, Base.issubtype, Base.isa, Base.isdefined, Base.is]),
                     (DataType, [Base.fieldtype, Base.apply_type]),
                     (UnionType, [Base.Union]),
@@ -744,7 +746,7 @@ const INTR_TYPES = [
                     (Any,[Core.eval]),
                     (Int32, [OtherBuiltins.isleaftype])
                     ]
-const FA_INTR = [Base.trunc_int, Base.sext_int, Base.uitofp, Base.sitofp, Base.fptosi, Base.box, Base.unbox, OtherBuiltins.new, Base.checked_fptosi]
+const FA_INTR = [Base.trunc_int, Base.sext_int, Base.uitofp, Base.sitofp, Base.fptosi, Base.box, Base.unbox, OtherBuiltins.new, Base.checked_fptosi, Base.checked_fptoui]
 
 function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
     if length(args) >= 1
@@ -764,7 +766,7 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
     end
     if f <= Const(Base.typeassert)
         cty = convert(Const, args[2])
-        istop(cty) && return top(V)
+        (istop(cty) || !isa(cty.v,Type)) && return top(V) #TODO Typevar
         return meet(args[1],convert(V, Ty(cty.v)))
     end
     if  f <= Const(OtherBuiltins.new_array) ||
@@ -865,6 +867,11 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
         argtypes[1] <= isa_ty && return convert(V, Const(true))
         isbot(meet(argtypes[1], isa_ty)) && return convert(V, Const(false))
         return convert(V, Ty(Bool))
+    end
+    if f <= Const(Base.pointerref)
+        cty = convert(Const,args[1])
+        (istop(cty) || !(cty.v <: Ptr)) && return top(V)
+        return convert(V, Ty(cty.v.parameters[1]))
     end
 
     if DEBUGWARN
@@ -1009,7 +1016,6 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
             # TODO move into function
             t.final, _ = join!(t.final, :thrown, final.thrown)
             t.final.must_throw = t.final.must_throw | final.must_throw
-            t.final.must_throw && println("Thread ", t.fc, " must throw is now ", t.final.must_throw)
             final.ret_val
         elseif isa(e, Expr)
             if e.head === :call || e.head === :call1 || e.head === :new
@@ -1208,6 +1214,7 @@ function Base.show(io::IO, s::Scheduler)
 #=    for t in s.threads
         println(io, "thread ", t)
     end=#
+    page_out = isa(io, Base.Terminals.TTYTerminal)
     fcs = [t.fc for t in s.threads]
     dfcs = [t.fc for t in s.done_threads]
     nthr = Dict([u => length(findin(fcs,u)) for u in unique(fcs)])
@@ -1224,6 +1231,7 @@ function Base.show(io::IO, s::Scheduler)
         end
         println(io, "final : ", s.final[k])
         println(io, "initial : ", s.initial[k])
+        page_out && (k % 30 == 0) && read(STDIN, Char)
     end
     println(io, "======")
 end
