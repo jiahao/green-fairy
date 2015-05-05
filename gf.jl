@@ -36,9 +36,9 @@ type Code
     label_pc :: Vector{Int} # label+1 => pc
     locals :: Set{LocalName}
     args :: Vector{Symbol}
-    linear_expr :: Vector{(Vector{Any},Vector{Int})} # ugly representation
+    linear_expr :: Vector{Tuple{Vector{Any},Vector{Int}}} # ugly representation
     isva :: Bool
-    tvar_mapping :: Tuple
+    tvar_mapping
     capt :: Vector{Symbol}
     decl_types :: Dict{LocalName,Any}
 end
@@ -84,13 +84,13 @@ eval_lit(::Type{Const}, v::ANY) = Const(v)
 immutable ConstCode{EnvT} <: TagLattice
     tag :: L3
     v :: Code
-    env :: (EnvT...,)
+    env :: Tuple{Vararg{EnvT}}
     ConstCode(tag::L3) = new(tag)
-    ConstCode(tag::L3,v::Code,env::(EnvT...,)) = new(tag,v,env)
-    ConstCode(tag::L3,v::Code,::()) = new(tag,v,())
+    ConstCode(tag::L3,v::Code,env::Tuple{Vararg{EnvT}}) = new(tag,v,env)
+    ConstCode(tag::L3,v::Code,::Tuple{}) = new(tag,v,())
 end
-ConstCode{E}(::Type{E},v::Code,::()) = ConstCode{E}(L3e, v, ())
-ConstCode{E}(::Type{E},v::Code,env::(E...,)) = ConstCode{E}(L3e, v, env)
+ConstCode{E}(::Type{E},v::Code,::Tuple{}) = ConstCode{E}(L3e, v, ())
+ConstCode{E}(::Type{E},v::Code,env::Tuple{Vararg{E}}) = ConstCode{E}(L3e, v, env)
 top{E}(::Type{ConstCode{E}}) = ConstCode{E}(top(L3))
 bot{E}(::Type{ConstCode{E}}) = ConstCode{E}(bot(L3))
 eval_lit{E}(::Type{ConstCode{E}}, v) = top(ConstCode{E})
@@ -118,9 +118,20 @@ eval_lit(::Type{Sign}, v::Int) = Sign(sign(v))
 eval_lit(::Type{Sign}, v::FloatingPoint) = Sign(round(Int, sign(v)))
 
 # ========== Type
+
+function widen(t::ANY) #TODO better this
+    if isa(t,UnionType)
+        Union(map(widen, t.types)...)
+    elseif t <: Tuple
+        Base.limit_tuple_type(t)
+    else
+        t
+    end
+end
+
 immutable Ty <: Lattice
     ty :: Type
-    Ty(t::ANY) = isa(t,Tuple) ? new(Base.limit_tuple_type(t)) : new(t)
+    Ty(t::ANY) = new(widen(t))
 end
 top(::Type{Ty}) = Ty(Any)
 bot(::Type{Ty}) = Ty(Union())
@@ -166,11 +177,11 @@ end
 prod{Ls}(values::Ls) = Prod(ntuple(i -> reduce(meet, map(v -> meet_ext(values[i], v), values)), length(values)))
 #top{Ls}(::Type{Prod{Ls}}) = Prod(map(T->top(T),Ls))
 #bot{Ls}(::Type{Prod{Ls}}) = Prod(map(T->bot(T),Ls))
-stagedfunction top{Ls}(::Type{Prod{Ls}})
-    :(Prod(tuple($([:(top($T)) for T in Ls]...))))
+@generated function top{Ls}(::Type{Prod{Ls}})
+    :(Prod(tuple($([:(top($T)) for T in Ls.types]...))))
 end
-stagedfunction bot{Ls}(::Type{Prod{Ls}})
-    :(Prod(tuple($([:(bot($T)) for T in Ls]...))))
+@generated function bot{Ls}(::Type{Prod{Ls}})
+    :(Prod(tuple($([:(bot($T)) for T in Ls.types]...))))
 end
 istop(x::Prod) = all(istop, x.values)
 isbot(x::Prod) = any(isbot, x.values)
@@ -194,8 +205,8 @@ end
 #=function join{Ls}(x::Prod{Ls}, y::Prod{Ls})
     Prod(map(join, x.values, y.values))
 end=#
-stagedfunction join{Ls}(x::Prod{Ls},y::Prod{Ls})
-    args = [:(join(x.values[$i],y.values[$i])) for i=1:length(Ls)]
+@generated function join{Ls}(x::Prod{Ls},y::Prod{Ls})
+    args = [:(join(x.values[$i],y.values[$i])) for i=1:length(Ls.types)]
     :(Prod(tuple($(args...))))
 end
 
@@ -206,27 +217,27 @@ end
     L in Ls || error("converting " * string(L) * " : " * string(x))
     x.values[findfirst(Ls,L)]
 end=#
-stagedfunction convert{L<:Lattice,Ls}(::Type{L},x::Prod{Ls})
-    L in Ls || error("converting " * string(L) * " : " * string(x))
-    idx = findfirst(Ls,L)
+@generated function convert{L<:Lattice,Ls}(::Type{L},x::Prod{Ls})
+    L in Ls.types || error("converting " * string(L) * " : " * string(x))
+    idx = findfirst(Ls.types,L)
     :(x.values[$idx])
 end
-eval_lit{Ls}(::Type{Prod{Ls}}, v) = Prod(map(T->eval_lit(T, v), Ls))
-stagedfunction meet{L,Ls}(x::Prod{Ls},y::L)
-    L in Ls || error("meet " * string(x) * " : " * string(y))
-    idx = findfirst(Ls,L)
-    args = [i == idx ? :(meet(x.values[$i],y)) : :(x.values[$i]) for i=1:length(Ls)]
+eval_lit{Ls}(::Type{Prod{Ls}}, v) = Prod(tuple(map(T->eval_lit(T, v), Ls.types)...))
+@generated function meet{L,Ls}(x::Prod{Ls},y::L)
+    L in Ls.types || error("meet " * string(x) * " : " * string(y))
+    idx = findfirst(Ls.types,L)
+    args = [i == idx ? :(meet(x.values[$i],y)) : :(x.values[$i]) for i=1:length(Ls.types)]
     :(prod(tuple($(args...))))
 end
-stagedfunction meet{Ls}(x::Prod{Ls},y::Prod{Ls})
-    args = [:(meet(x.values[$i],y.values[$i])) for i=1:length(Ls)]
+@generated function meet{Ls}(x::Prod{Ls},y::Prod{Ls})
+    args = [:(meet(x.values[$i],y.values[$i])) for i=1:length(Ls.types)]
     :(prod(tuple($(args...))))
 end
 convert{L}(::Type{Prod{L}}, y::Prod{L})=y
-stagedfunction convert{L,Ls}(::Type{Prod{Ls}},y::L)
-    L in Ls || error("convert : ", string(Ls), " < ", string(y))
-    idx = findfirst(Ls,L)
-    args = [i == idx ? :y : :(top($(Ls[i]))) for i=1:length(Ls)]
+@generated function convert{L,Ls}(::Type{Prod{Ls}},y::L)
+    L in Ls.types || error("convert : ", string(Ls), " < ", string(y))
+    idx = findfirst(Ls.types,L)
+    args = [i == idx ? :y : :(top($(Ls.types[i]))) for i=1:length(Ls.types)]
     :(prod(tuple($(args...))))
 end
 
@@ -238,7 +249,7 @@ join{Ls}(p::Prod{Ls},v::Lattice) = join(p,convert(Prod{Ls},v))
 
 # ========== Interpreter
 
-const TRACE = false
+const GTRACE = false
 
 type Config
     join_strat :: Symbol
@@ -507,15 +518,17 @@ function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args,env
         args = args[1:narg]
     end
     if narg != length(args)
-        warn(@sprintf("Wrong arg count : %s vs %s%s", fcode.args, args, fcode.isva ? " (vararg)" : ""))
-        return bot(V)
+        warn(@sprintf("Wrong arg count for %s : %s vs %s%s", fcode, fcode.args, args, fcode.isva ? " (vararg)" : ""))
+        return -1 # TODO ditto
     end
     for i = 1:narg
         argname = fcode.args[i]
         arg = args[i]
         if haskey(fcode.decl_types, argname)
-            cty = convert(Const,eval_sym(sched, state, fcode, fcode.decl_types[argname]))
-            istop(cty) || (arg = meet(arg, convert(V,Ty(cty.v))))
+            declty = fcode.decl_types[argname]
+            if isa(declty,Type) # TODO handle typevars here (and everywhere ?)
+                arg = meet(arg, convert(V,Ty(declty)))
+            end
         end
         eval_assign!(sched, child, argname, arg)
     end
@@ -534,8 +547,11 @@ function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args,env
         eval_assign!(sched, child, fcode.capt[i], i > length(env) ? top(V) : convert(V,env[i]))
     end
     for fc in 1:length(sched.funs)
-        if sched.funs[fc] === fcode && child.state <= sched.initial[fc]
-            return fc
+        if sched.funs[fc] === fcode
+            if (child.state <= sched.initial[fc] && sched.initial[fc] <= child.state) # TODO could be less precise & more efficient
+                return fc
+            else
+            end
         end
     end
     fc = register_fun!(sched, fcode)
@@ -550,7 +566,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, fun::V, args::V...
     f = convert(Const,fun)
     if f <= Const(Base._apply)
         actual_args = []
-        if args[2] <= Ty(Function)
+        if args[2] <= Ty(Function) # handle the strange _apply semantics
             fun = args[2]
         else
             fun = args[1]
@@ -558,12 +574,13 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, fun::V, args::V...
         end
         for i=3:length(args)
             if args[i] <= Ty(Tuple)
-                l = convert(Const, eval_call!(t, V, convert(V,Const(Base.tuplelen)), args[i]))
+                l = convert(Const, eval_call!(t, V, convert(V,Const(Base.nfields)), args[i]))
                 istop(l) && return top(V)
                 for k=1:l.v
-                    push!(actual_args, eval_call!(t, V, convert(V,Const(Base.tupleref)), args[i], convert(V,l)))
+                    push!(actual_args, eval_call!(t, V, convert(V,Const(Base.getfield)), args[i], convert(V,Const(k))))
                 end
             else # TODO handle other iterators
+                # TODO also even when not known iterable replace (a0, ..., an, unknown, b0,...) with (a0, ..., an, vararg{something}) : sometimes the method match is simple
                 return top(V)
             end
         end
@@ -631,17 +648,17 @@ function eval_new!{V}(t::Thread, args::V...)
     eval_call!(t, V, meet(top(V), Const(OtherBuiltins.new)), args...)
 end
 
-stagedfunction eval_call!{Ls}(t::Thread, ::Type{Prod{Ls}}, f::Prod{Ls}, args::Prod{Ls}...)
+@generated function eval_call!{Ls}(t::Thread, ::Type{Prod{Ls}}, f::Prod{Ls}, args::Prod{Ls}...)
     ex = :(top(Prod{Ls}))
-    for L in Ls
+    for L in Ls.types
         ex = :(meet($ex, eval_call!(t, $L, f, args...)))
     end
     ex
 end
 #TODO rename this as const_funs or sthing
 # TODO add intrinsics that can throw
-const BITS_INTR = [Base.add_int, Base.sub_int, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.slt_int, Base.sle_int, Base.not_int,Base.apply_type, Base.issubtype, Base.tuple, Base.tuplelen, Base.tupleref, Core.sizeof, Base.fieldtype, Base.Union]
-const BITS_FUNC = [+, -, *, %, leading_zeros, <, <=, !, Base.apply_type, Base.issubtype, Base.tuple, Base.tuplelen, Base.tupleref, Core.sizeof, Base.fieldtype, Base.Union]
+const BITS_INTR = [Base.add_int, Base.sub_int, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.slt_int, Base.sle_int, Base.not_int,Base.apply_type, Base.issubtype, Base.tuple, Base.nfields, Core.sizeof, Base.fieldtype, Base.Union]
+const BITS_FUNC = [+, -, *, %, leading_zeros, <, <=, !, Base.apply_type, Base.issubtype, Base.tuple, Base.nfields, Core.sizeof, Base.fieldtype, Base.Union]
 @assert length(BITS_INTR) == length(BITS_FUNC)
 function eval_call!{V}(t::Thread, ::Type{Sign}, f::V, args::V...)
     if (f <= Const(Base.unbox) || f <= Const(Base.box))
@@ -729,35 +746,38 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
     end
     if f <= Const(Base.tuple)
         # TODO rebase on top of new tuple types
-        return convert(V,Ty(map(a->a.ty,argtypes)))
+        return convert(V,Ty(Tuple{map(a->a.ty,argtypes)...}))
     end
     if f <= Const(Base.arraylen) || f <= Const(Base.arraysize)
         argtypes[1] <= Ty(Array) || return bot(V)
         return convert(V, Ty(Int))
     end
-    if f <= Const(Base.tuplelen)
-        argtypes[1] <= Ty(Tuple) || return bot(V)
+    if f <= Const(Base.nfields)
         tty = argtypes[1].ty
-        len = length(tty)
-        len == 0 && return convert(V,Const(0))
-        tty[end] <: Vararg && return convert(V,Ty(Int))
-        return convert(V, Const(len))
+        (isleaftype(tty) || tty <: Tuple) && return convert(V, Const(length(tty.types)))
+        return convert(V, Ty(Int))
     end
     if f <= Const(Base.getfield)
         aty = argtypes[1].ty
-        isleaftype(aty) && aty !== Module || return top(V)
+        aty === Module && return top(V)
+        istuple = aty <: Tuple
+        isleaftype(aty) || istuple || return top(V)
         fld = convert(Const, args[2])
         istop(fld) && return top(V) # could join() all field types
         fldv = fld.v
-        fidx = if isa(fldv, Symbol)
+        fidx = if isa(fldv, Symbol) && !istuple
             findfirst(fieldnames(aty), fldv)
         elseif isa(fldv, Int)
             fldv
         else
             0
         end
-        1 <= fidx <= length(aty.types) || return bot(V)
-        return convert(V, Ty(aty.types[fidx]))
+        len = length(aty.types)
+        isva = istuple && len > 0 && aty.types[end] <: Vararg
+        1 <= fidx || return bot(V)
+        isva || fidx <= len || return bot(V)
+        ftyp = fidx <= len ? aty.types[fidx] : aty.types[end].parameters[1]
+        return convert(V, Ty(ftyp))
     end
     if f <= Const(Base.setfield!)
         # TODO return bot for wrong fields
@@ -780,27 +800,6 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
         typ = convert(Const, args[2])
         istop(typ) && return top(V)
         return convert(V, Ty(typ.v))
-    end
-    if f <= Const(Base.tupleref)
-        argtypes[1] <= Ty(Tuple) || return top(V)
-        tty = argtypes[1].ty
-        len = length(tty)
-        len == 0 && return bot(V)
-        va = bot(Ty)
-        isva = false
-        if tty[end] <: Vararg
-            va = Ty(tty[end].parameters[1])
-            isva = true
-            len -= 1
-        end
-        idx = convert(Const,args[2])
-        # unknown index access :
-        istop(idx) && return convert(V,foldl(join, va, map(Ty, tty[1:len])))
-        # OOB access :
-        idx.v >= 1 || return bot(V)
-        isva || idx.v <= len || return bot(V)
-        # we know everything
-        return idx.v <= len ? Ty(tty[idx.v]) : va
     end
     if f <= Const(Base.arrayref)
         argtypes[1] <= Ty(Array) || return top(V)
@@ -890,7 +889,7 @@ function eval_call!{V,EV}(t::Thread, ::Type{ConstCode{EV}}, f::V, args::V...)
         (istop(ty) || ty.v != Function) && return top(V)
         code = convert(Const, args[2])
         istop(code) && return top(V)
-        actual_code = code_from_ast(code.v, ())
+        actual_code = code_from_ast(code.v, (), Tuple)
         # TODO the env evaluation should be part of the expr tree
         env = map!(capt_var -> convert(EV,eval_local(t.state, capt_var)), Array(EV, length(actual_code.capt)), actual_code.capt)
         return convert(V,ConstCode(EV, actual_code, tuple(env...)))
@@ -917,6 +916,10 @@ function eval_sym {V}(sched::Scheduler{V},state,code,e)
 end
 
 function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
+    TRACE = GTRACE
+    if t.fc ==1104
+        TRACE = true
+    end
     code = sched.funs[t.fc]
     values = sched.values
     le = code.linear_expr[t.pc]
@@ -986,8 +989,8 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
         if res === nothing
             return
         end
-        values[t.fc,t.pc,t.ec] = res
         TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", res))
+        values[t.fc,t.pc,t.ec] = res
         t.ec += 1
     end;if t.ec > length(le[1]) # TODO think wether we wa
         #    else
@@ -1118,7 +1121,7 @@ function step!(s::Scheduler)
             deleteat!(s.threads, same_func)
             s.done[t.fc] = true
         end
-        TRACE && println("THREAD FINISHED ", false, "/", s.values.changed, "/", t.wait_on != nothing, " ================")
+        GTRACE && println("THREAD FINISHED ", false, "/", s.values.changed, "/", t.wait_on != nothing, " ================")
     end
 end
 LIM = 500000
@@ -1185,10 +1188,6 @@ function linearize!(e,v,ds,d)
             push!(v, :UNKNOWN)
             push!(ds,d)
             return v,ds
-        #=elseif isa(e.args[1], TopNode) && e.args[1].name in (:box,:unbox) ||# TODO
-            e.args[1] in (:box,:unbox)
-            linearize!(e.args[3], v, ds, d)
-            return v,ds=#
         end
         for a in e.args
             linearize!(a, v, ds, d+1)
@@ -1222,13 +1221,14 @@ end
 
 const _code_cache = Dict{Any,Code}()
 const SR = []
-function code_from_ast(linf,tenv)
-    key = (linf,tenv)
+function code_from_ast(linf,tenv,sig)
+    TRACE = GTRACE
+    key = (linf,collect(tenv)) # TODO svec don't hash correctly with tvars ?
     haskey(_code_cache, key) && return _code_cache[key]
-    TRACE && @show ast
     fun_name = linf.name
     mod = linf.module
     ast = Base.uncompressed_ast(linf)
+    TRACE && @show ast
     body = ast.args[3].args
     label_pc = Array(Int, 0)
     for pc = 1:length(body)
@@ -1245,8 +1245,9 @@ function code_from_ast(linf,tenv)
     locs = Set{LocalName}(ast.args[2][1])
     isva = false
     args = map(ast.args[1]) do a
-        if isa(a, Expr) && a.head == :(::) # TODO ugh
-            if isa(a.args[2],Expr) && a.args[2].head === :call && a.args[2].args[1] === TopNode(:apply_type) && a.args[2].args[2] === :Vararg
+        if isa(a, Expr) && a.head === :(::) # TODO ugh
+            if isa(a.args[2],Expr) && (a.args[2].head === :call && a.args[2].args[1] === TopNode(:apply_type) && a.args[2].args[2] === :Vararg ||
+                                       a.args[2].head === :(...))
                 isva = true
             end
             a.args[1]
@@ -1258,18 +1259,28 @@ function code_from_ast(linf,tenv)
         end
     end
     decltypes = Dict{LocalName,Any}()
+    sigtypes = sig.types
+    for argn = 1:length(args)
+        ty = sigtypes[min(argn,end)]
+        ty = ty <: Vararg ? ty.parameters[1] : ty
+        isva && argn==length(args) && (ty = Tuple{Vararg{ty}})
+        decltypes[args[argn]] = ty
+    end
+    if isva
+        decltypes[args[end]] = Tuple{sigtypes[end]}
+    end
     capt = Array(Symbol, 0)
     union!(locs,args)
-    for varinfo in ast.args[2][2]
+    #=for varinfo in ast.args[2][2] # locals
         name = varinfo[1]
         if !(name in locs)
             error(@sprintf("Unknown varinfo : %s", varinfo))
         end
         decltypes[name] = varinfo[2]
-    end
-    for varinfo in ast.args[2][3]
+    end=#
+    for varinfo in ast.args[2][3] # captured
         name = varinfo[1]
-        decltypes[name] = varinfo[2]
+        #decltypes[name] = varinfo[2]
         push!(capt, name)
     end
     union!(locs,capt)
@@ -1283,8 +1294,16 @@ function code_from_ast(linf,tenv)
     c
 end
 
+const _staged_cache = Dict{Any,Any}()
+
 function code(f::Function,argtypes::ANY)
-    meths = Base._methods(f,argtypes, -1)
+    meths = []
+    try
+        meths = Base._methods(f,argtypes, -1)
+    catch
+        println("Tryed ", f, " ", argtypes)
+        rethrow()
+    end
     if meths === false || length(meths) > 1
         return length(meths)
     end
@@ -1295,9 +1314,20 @@ function code(f::Function,argtypes::ANY)
     func = meth.func
     tenv = meths[1][2]
     if meth.isstaged
-        func = ccall(:jl_instantiate_staged, Any,(Any,Any,Any), meth, argtypes, tenv)
+        key = (meth, argtypes, tenv)
+        if !haskey(_staged_cache, key)
+            try
+                func = ccall(:jl_instantiate_staged, Any,(Any,Any,Any), meth, Tuple{argtypes...}, tenv)
+            catch
+                func = false
+            end
+            _staged_cache[key] = func
+        else
+            func = _staged_cache[key]
+        end
     end
-    c = code_from_ast(func.code, tenv)
+    func !== false || return false
+    c = code_from_ast(func.code, tenv, meth.sig)
     c
 end
 
@@ -1392,7 +1422,7 @@ export Prod,Sign,Const,Ty,Birth,LocalStore,Thread,FunctionState,Scheduler,Code,F
 
 module Analysis
 using GreenFairy
-const ValueT = Prod{(Const,Ty,Sign,Birth,ConstCode{Ty})}
+const ValueT = Prod{Tuple{Const,Ty,Sign,Birth,ConstCode{Ty}}}
 const StateT = ThreadState{LocalStore{ValueT}}
 const FinalT = FinalState{ValueT}
 make_sched(conf) = Scheduler(ExprState(ValueT),FunState(StateT),FunState(FinalT),Array(Bool,0),Array(Thread{StateT,FinalT},0),Array(Thread{StateT,FinalT},0),conf,Array(Set{Any},0),Array(Code,0))
@@ -1419,7 +1449,7 @@ function run(f::Function, args)
 end
 
 function RUN(F::Function,args::ANY)
-    sched = Analysis.make_sched(Config(:always))
+    global sched = Analysis.make_sched(Config(:always))
     eval_call_gf!(sched, bot(Analysis.StateT), F, map(a->convert(Analysis.ValueT, Ty(a)), args))
     #=fc = register_fun!(sched, code(F, args))
     push!(sched.threads, Thread(Analysis.StateT,Analysis.FinalT,fc,1,1))=#
