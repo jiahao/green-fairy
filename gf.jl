@@ -1,14 +1,28 @@
 #= TODO
-- make dispatch pluggable with abstract values (ConstCode & Ty)
-  (then add uncertain matches)
-- unify generic & anonymous call path (and support capt. vars in generic code)
+
+- dispatch
+  - make dispatch pluggable with abstract values (ConstCode & Ty)
+    (then add uncertain matches)
+  - unify generic & anonymous call path (and support capt. vars in generic code)
+
 - find a common interface for mutable state (Final,Thread,...)
 - better "visited" (keyed state, what about non increasing state i.e. strong update)
+
+- make the canonicalized ccall homogenous
+- figure out what to do with :& arguments
+
+- support kwcall
+
+- exceptions :
+  - use jl_rethrow instead of Base.rethrow
+  - mark may_throw intrinsics correctly
+  - mark method error thrown correctly
 
 - better representation of the Expr tree (wait for the bytecode ?)
 - think about on-the-fly code mutation (inlining, actual constprop, ...)
 
 - think about implementing type_goto
+
 =#
 
 module GreenFairy
@@ -115,7 +129,7 @@ end
 meet(x,y) = x <= y ? x : y
 eval_lit(::Type{Sign}, v::ANY) = top(Sign)
 eval_lit(::Type{Sign}, v::Int) = Sign(sign(v))
-eval_lit(::Type{Sign}, v::FloatingPoint) = Sign(round(Int, sign(v)))
+eval_lit(::Type{Sign}, v::FloatingPoint) = isnan(v) ? top(Sign) : Sign(round(Int, sign(v)))
 
 # ========== Type
 
@@ -250,6 +264,7 @@ join{Ls}(p::Prod{Ls},v::Lattice) = join(p,convert(Prod{Ls},v))
 # ========== Interpreter
 
 const GTRACE = false
+const DEBUGWARN = true
 
 type Config
     join_strat :: Symbol
@@ -468,6 +483,9 @@ const new_array = :new_array_tag
 const new_array_1d = :new_array_1d_tag
 const new_array_2d = :new_array_2d_tag
 const new_array_3d = :new_array_3d_tag
+function isleaftype(x::ANY)
+    ccall(:jl_is_leaf_type, Int32, (Any,), x)
+end
 end
 
 
@@ -518,7 +536,7 @@ function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args,env
         args = args[1:narg]
     end
     if narg != length(args)
-        warn(@sprintf("Wrong arg count for %s : %s vs %s%s", fcode, fcode.args, args, fcode.isva ? " (vararg)" : ""))
+        DEBUGWARN && warn(@sprintf("Wrong arg count for %s : %s vs %s%s", fcode, fcode.args, args, fcode.isva ? " (vararg)" : ""))
         return -1 # TODO ditto
     end
     for i = 1:narg
@@ -542,7 +560,7 @@ function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args,env
         tval = fcode.tvar_mapping[i+1]
         eval_assign!(sched, child, tv.name, convert(V,Const(tval)))
     end
-    length(env) == length(fcode.capt) || warn(@sprintf("Wrong env size %d vs %d : %s vs %s", length(env), length(fcode.capt), env, fcode.capt))
+    length(env) == length(fcode.capt) || DEBUGWARN && warn(@sprintf("Wrong env size %d vs %d : %s vs %s", length(env), length(fcode.capt), env, fcode.capt))
     for i=1:length(fcode.capt)
         eval_assign!(sched, child, fcode.capt[i], i > length(env) ? top(V) : convert(V,env[i]))
     end
@@ -625,14 +643,19 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread{S}, fun::V, args::V...
             if f <= Const(Base.ccall)
                 # TODO add rethrow here instead of hijacking Base.rethrow
                 known_ccall = # TODO make this less ugly
-                (args[2] <= Const(:jl_new_array) ? OtherBuiltins.new_array :
-                 args[2] <= Const(:jl_alloc_array_1d) ? OtherBuiltins.new_array_1d :
-                 args[2] <= Const(:jl_alloc_array_2d) ? OtherBuiltins.new_array_2d :
-                 args[2] <= Const(:jl_alloc_array_3d) ? OtherBuiltins.new_array_3d : nothing)
+                (args[1] <= Const(:jl_new_array) ? OtherBuiltins.new_array :
+                 args[1] <= Const(:jl_alloc_array_1d) ? OtherBuiltins.new_array_1d :
+                 args[1] <= Const(:jl_alloc_array_2d) ? OtherBuiltins.new_array_2d :
+                 args[1] <= Const(:jl_alloc_array_3d) ? OtherBuiltins.new_array_3d :
+                 args[1] <= Const(:jl_is_leaf_type) ? OtherBuiltins.isleaftype : nothing)
                 if known_ccall !== nothing
-                    args = tuple(args[5:end]...)
-                    fun = convert(V, known_ccall)
+                    args = tuple(args[4:end][1:2:end]...)
+                    fun = convert(V, Const(known_ccall))
                 end
+            end
+            if f <= Const(Base._expr)
+                fun = convert(V,Const(OtherBuiltins.new))
+                args = tuple(convert(V,Const(Base.Expr)), args...)
             end
             result = eval_call!(t, V, fun, args...)
             #=if !istop(convert(Const, fun)) && istop(result) && !any(istop, args)
@@ -657,8 +680,8 @@ end
 end
 #TODO rename this as const_funs or sthing
 # TODO add intrinsics that can throw
-const BITS_INTR = [Base.add_int, Base.sub_int, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.slt_int, Base.sle_int, Base.not_int,Base.apply_type, Base.issubtype, Base.tuple, Base.nfields, Core.sizeof, Base.fieldtype, Base.Union]
-const BITS_FUNC = [+, -, *, %, leading_zeros, <, <=, !, Base.apply_type, Base.issubtype, Base.tuple, Base.nfields, Core.sizeof, Base.fieldtype, Base.Union]
+const BITS_INTR = [Base.add_float,Base.add_int, Base.sub_int, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.slt_int, Base.sle_int, Base.not_int,Base.apply_type, Base.issubtype, Base.tuple, Base.nfields, Core.sizeof, Base.fieldtype, Base.Union, Base.svec, OtherBuiltins.isleaftype, Base.is]
+const BITS_FUNC = [+,+, -, *, %, leading_zeros, <, <=, !, Base.apply_type, Base.issubtype, Base.tuple, Base.nfields, Core.sizeof, Base.fieldtype, Base.Union, Base.svec, OtherBuiltins.isleaftype, Base.is]
 @assert length(BITS_INTR) == length(BITS_FUNC)
 function eval_call!{V}(t::Thread, ::Type{Sign}, f::V, args::V...)
     if (f <= Const(Base.unbox) || f <= Const(Base.box))
@@ -697,13 +720,31 @@ function eval_call!{V}(t::Thread, ::Type{Sign}, f::V, args::V...)
     top(V)
 end
 
+function intrinsic_name(cv)
+    intrname = string(cv)
+    for fn in names(Core.Intrinsics)
+        intr = Core.Intrinsics.(fn)
+        if intr === cv
+            intrname = string(fn)
+            break
+        end
+    end
+    intrname
+end
+
+# TODO make this correct, add exception info
 const INTR_TYPES = [
                     (Int, [Base.add_int, Base.sub_int,Base.check_top_bit, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.ashr_int, Base.checked_ssub, Base.checked_sadd, Base.and_int, Base.flipsign_int, Base.shl_int, Base.lshr_int, Base.xor_int, Base.and_int, Base.neg_int, Base.or_int, Base.sdiv_int, Base.cttz_int, Core.sizeof]),
                     (UInt, [Base.udiv_int, Base.urem_int]),
-                    (Float64, [Base.div_float, Base.mul_float, Base.ceil_llvm, Base.sub_float, Base.neg_float]),
-                    (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float])
+                    (Float64, [Base.add_float, Base.div_float, Base.mul_float, Base.ceil_llvm, Base.sub_float, Base.neg_float, Base.abs_float]),
+                    (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float, Base.issubtype, Base.isa, Base.isdefined, Base.is]),
+                    (DataType, [Base.fieldtype, Base.apply_type]),
+                    (UnionType, [Base.Union]),
+                    (SimpleVector, [Base.svec]),
+                    (Any,[Core.eval]),
+                    (Int32, [OtherBuiltins.isleaftype])
                     ]
-const FA_INTR = [Base.trunc_int, Base.sext_int, Base.uitofp, Base.sitofp, Base.fptosi, Base.box, Base.unbox, OtherBuiltins.new]
+const FA_INTR = [Base.trunc_int, Base.sext_int, Base.uitofp, Base.sitofp, Base.fptosi, Base.box, Base.unbox, OtherBuiltins.new, Base.checked_fptosi]
 
 function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
     if length(args) >= 1
@@ -715,11 +756,16 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
             end
         end
     end
-    # cglobal takes the return type as second argument ...
+    # cglobal and typassert take the return type as second argument ...
     if f <= Const(Base.cglobal)
         cty = convert(Const, args[2])
         istop(cty) && return top(V)
         return convert(V, Ty(cty.v))
+    end
+    if f <= Const(Base.typeassert)
+        cty = convert(Const, args[2])
+        istop(cty) && return top(V)
+        return meet(args[1],convert(V, Ty(cty.v)))
     end
     if  f <= Const(OtherBuiltins.new_array) ||
         f <= Const(OtherBuiltins.new_array_1d) ||
@@ -749,7 +795,6 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
         return convert(V,Ty(Tuple{map(a->a.ty,argtypes)...}))
     end
     if f <= Const(Base.arraylen) || f <= Const(Base.arraysize)
-        argtypes[1] <= Ty(Array) || return bot(V)
         return convert(V, Ty(Int))
     end
     if f <= Const(Base.nfields)
@@ -762,22 +807,27 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
         aty === Module && return top(V)
         istuple = aty <: Tuple
         isleaftype(aty) || istuple || return top(V)
-        fld = convert(Const, args[2])
-        istop(fld) && return top(V) # could join() all field types
-        fldv = fld.v
-        fidx = if isa(fldv, Symbol) && !istuple
-            findfirst(fieldnames(aty), fldv)
-        elseif isa(fldv, Int)
-            fldv
-        else
-            0
-        end
         len = length(aty.types)
         isva = istuple && len > 0 && aty.types[end] <: Vararg
-        1 <= fidx || return bot(V)
-        isva || fidx <= len || return bot(V)
-        ftyp = fidx <= len ? aty.types[fidx] : aty.types[end].parameters[1]
-        return convert(V, Ty(ftyp))
+
+        fld = convert(Const, args[2])
+        if istop(fld) # non constant field
+            types = map(Ty,isva ? aty.types[1:end-1] : aty.types)
+            return convert(V,foldl(join, isva ? Ty(aty.types[end].parameters[1]) : bot(Ty), types))
+        else # constant field
+            fldv = fld.v
+            fidx = if isa(fldv, Symbol) && !istuple
+                findfirst(fieldnames(aty), fldv)
+            elseif isa(fldv, Int)
+                fldv
+            else
+                0
+            end
+            1 <= fidx || return bot(V)
+            isva || fidx <= len || return bot(V)
+            ftyp = fidx <= len ? aty.types[fidx] : aty.types[end].parameters[1]
+            return convert(V, Ty(ftyp))
+        end
     end
     if f <= Const(Base.setfield!)
         # TODO return bot for wrong fields
@@ -806,8 +856,7 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
         return convert(V,Ty(argtypes[1].ty.parameters[1]))
     end
     if f <= Const(Base.arrayset)
-        argtypes[1] <= Ty(Array) || return top(V)
-        return convert(V,argtypes[1])
+        return args[1]
     end
     if f <= Const(Base.isa)
         cty = convert(Const,args[2])
@@ -817,17 +866,19 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
         isbot(meet(argtypes[1], isa_ty)) && return convert(V, Const(false))
         return convert(V, Ty(Bool))
     end
-    if f <= Ty(IntrinsicFunction)
-        cv = convert(Const,f).v
-        intrname = string(cv)
-        for fn in names(Core.Intrinsics)
-            intr = Core.Intrinsics.(fn)
-            if intr === cv
-                intrname = string(fn)
-                break
-            end
+
+    if DEBUGWARN
+        if f <= Ty(IntrinsicFunction)
+            cv = convert(Const,f).v
+            intrname = intrinsic_name(cv)
+            warn(@sprintf("Unknown intrinsic %s with args %s", intrname, args))
+            return top(V)
         end
-        warn(@sprintf("Unknown intrinsic %s with args %s", intrname, args))
+        if !istop(convert(Const,f))
+            fv = convert(Const,f)
+            isdefined(fv,:code) &&fv.code.name === :anonymous && return top(V)
+            warn(@sprintf("Unknown builtin type %s %s with args %s", f, args, f))
+        end
     end
     top(V)
 end
@@ -845,7 +896,7 @@ function eval_call!{V}(t::Thread, ::Type{Const}, f::V, args::V...)
             try
                 res = Const(rf(argvals...))
             catch
-                warn("thrown calling ", f, " ", argvals)
+                DEBUGWARN && warn("thrown calling ", f, " ", argvals)
             end
             return convert(V,res)
         end
@@ -861,7 +912,8 @@ function eval_call!{V}(t::Thread, ::Type{Const}, f::V, args::V...)
     end
 
     # immutable.const (types are immutable for all intent and purposes)
-    if f <= Const(Base.getfield) && (isimmutable(cargs[1].v) || isa(cargs[1].v, Type))
+    if f <= Const(Base.getfield)
+        isimmutable(cargs[1].v) || isa(cargs[1].v, Type) || return top(V)
         v = cargs[1].v
         name = cargs[2].v
         if (isa(name,Symbol) || isa(name,Int)) && isdefined(v, name)
@@ -871,6 +923,21 @@ function eval_call!{V}(t::Thread, ::Type{Const}, f::V, args::V...)
         end
     end
 
+    if f <= Const(OtherBuiltins.new) # TODO consider which class of types are safe to construct here
+        return top(V)
+    end
+
+    if DEBUGWARN
+        if f <= Ty(IntrinsicFunction)
+            cv = convert(Const,f).v
+            intrname = intrinsic_name(cv)
+            warn(@sprintf("Unknown intrinsic const %s with args %s", intrname, args))
+            return top(V)
+        end
+        if !(f <= Const(Base.isa)) && !(f <= Const(Base.typeassert))
+            warn(@sprintf("Unknown builtin const %s with args %s", f, args))
+        end
+    end
     top(V)
 end
 function eval_call!{V}(t::Thread, ::Type{Birth}, f::V, args::V...)
@@ -917,9 +984,6 @@ end
 
 function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
     TRACE = GTRACE
-    if t.fc ==1104
-        TRACE = true
-    end
     code = sched.funs[t.fc]
     values = sched.values
     le = code.linear_expr[t.pc]
@@ -1175,7 +1239,11 @@ function linearize!(e,v,ds,d)
         push!(v,e)
         push!(ds,d)
     else
-        e.head === :call || e.head ===:call1 || e.head === :new || e.head === :copyast || e.head === :static_typeof || e.head === :the_exception || error("not a call " * string(e) * " : " * string(v))
+        if !(e.head === :call || e.head ===:call1 || e.head === :new || e.head === :copyast || e.head === :static_typeof || e.head === :the_exception || e.head === :&)
+            Meta.show_sexpr(e)
+            println()
+            error("not a call " * string(e) * " : " * string(v))
+        end
         if e.head == :the_exception
             push!(v, :the_exception) # TODO name collision ?
             push!(ds,d)
@@ -1188,6 +1256,8 @@ function linearize!(e,v,ds,d)
             push!(v, :UNKNOWN)
             push!(ds,d)
             return v,ds
+        elseif e.head === :& # TODO
+            return linearize!(e.args[1], v, ds, d)
         end
         for a in e.args
             linearize!(a, v, ds, d+1)
@@ -1382,6 +1452,10 @@ end
 
 type ThreadState{Loc} <: Lattice
     locals :: Loc
+end
+function Base.show(io::IO, s::ThreadState)
+    print(io, "locals : ")
+    show(io, s.locals)
 end
 top{L}(::Type{ThreadState{L}}) = ThreadState(top(L))
 bot{L}(::Type{ThreadState{L}}) = ThreadState(bot(L))
