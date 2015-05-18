@@ -1086,49 +1086,6 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
         ft = fork(sched, t, branch_pc)
     end
     t.pc = next_pc
-    #=
-        #    else
-        res = values[t.fc,t.pc,t.ec-1]
-        stmt = code.body[t.pc]
-        TRACE && (print("Result of ");Meta.show_sexpr(stmt);println(" : ", res))
-        next_pc = t.pc+1
-        branch_pc = next_pc
-        if isa(stmt, GotoNode)
-        elseif isa(stmt, SymbolNode) || isa(stmt, GenSym) || isa(stmt,Symbol) || isa(stmt, NewvarNode)
-        elseif isa(stmt,LineNumberNode) || isa(stmt,LabelNode)
-        elseif stmt.head === :return
-        elseif stmt.head === :gotoifnot
-        elseif stmt.head == :enter
-            push!(t.eh_stack, code.label_pc[stmt.args[1]::Int+1])
-        elseif stmt.head == :leave
-            if !isbot(t.final.thrown) # could throw
-                handler_pc = t.eh_stack[end]
-                ft = fork(sched, t, handler_pc)
-                ft.final.thrown = bot(Ty)
-                ft.final.must_throw = false
-                eval_assign!(sched, ft, :the_exception, t.final.thrown)
-                t.final.thrown = bot(Ty)
-                if t.final.must_throw # thrown for sure
-                    next_pc = branch_pc = length(code.body)+1
-                end
-                t.final.must_throw = false
-            end
-            for i=1:(stmt.args[1]::Int)
-                pop!(t.eh_stack)
-            end
-        end
-        push!(t.visited, t.pc)
-        if isa(stmt,Expr) && stmt.head === :(=)
-            @assert next_pc == branch_pc
-            eval_assign!(sched, t, stmt.args[1]::LocalName, res)
-        end
-        if next_pc != branch_pc
-            ft = fork(sched, t, branch_pc)
-        end
-        t.pc = next_pc
-        if done(sched, t)
-            join!(t.final, :ret_val, res)
-        end=#
     nothing
 end
 
