@@ -37,6 +37,8 @@ The soundness of $\overline{\text{sem}}$ and $\overline{\text{br}}$ can then be 
 
 \end{array}\right.\]
 
+
+
 \subsection{Implementation scheme}
 
 Given a program and abstraction mapping for the machine state we want to compute some information about the trace semantic of the program. In the most general case, the abstract trace semantic is given by the image of $(\bot,\mathbf{1})$ under the transitive closure of $\overline{\sigma}$. It is of course expressible as a least-fixed-point :
@@ -56,6 +58,12 @@ An abstract approximation for such an alias state is the data of an upper and lo
 
 \paragraph{Impl} Only keep short fixed-size strings of field indices (say a byte/half a byte per field). More precise AA information is given by type information. Maybe introduce limited DFA capabilities (probably non nested and only in last position) : $f_1.f_2.(\dots).(f'_1+\dots+f'_n)^*$. The lower bound $\uD$ being an eqv we can use the good old $O(\alpha^{-1}(n))$ amortized union find structure. Still need to think if taking the eqv closure of $\UD$ is too lossy OR if not taking it is too expensive.
 
+
+\subsection{State classification}
+
+There are two dimensions upon which we may wish to exercise the precision-efficienty tradeoff : control flow and temporality. 
+
+
 \subsection{Remaining Qs}
 
 Temporary state keys classification in decreasing precision order :
@@ -73,5 +81,6 @@ Optimizations :
 if a particular state key is pc-insensitive (thus weak) we only need to remember a boolean flag (increased) (...not generic enough)
 
 Is there a generic way to handle optimal state memoization ?
+Can it be done dynamically ? Or does it require static knowledge of use/def r/w info for each insn (or conservative approximation thereof) ?
 
 \end{document}

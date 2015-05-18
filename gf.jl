@@ -48,10 +48,10 @@ type Code
     mod :: Module
     name :: Symbol
     body :: Vector{Any}
+    call_args :: Vector{Tuple{Vararg{Int}}}
     label_pc :: Vector{Int} # label+1 => pc
     locals :: Set{LocalName}
     args :: Vector{Symbol}
-    linear_expr :: Vector{Tuple{Vector{Any},Vector{Int}}} # ugly representation
     isva :: Bool
     tvar_mapping
     capt :: Vector{Symbol}
@@ -165,16 +165,15 @@ immutable Birth <: Lattice
     tag :: L3
     fc :: Int
     pc :: Int
-    ec :: Int
 end
 # TODO join(k:x:y,k:z:w) = k:*:*
-Birth(fc::Int,pc::Int,ec::Int) = Birth(L3e, fc, pc, ec)
-top(::Type{Birth}) = Birth(top(L3), 0, 0, 0)
-bot(::Type{Birth}) = Birth(bot(L3), 0, 0, 0)
+Birth(fc::Int,pc::Int) = Birth(L3e, fc, pc)
+top(::Type{Birth}) = Birth(top(L3), 0, 0)
+bot(::Type{Birth}) = Birth(bot(L3), 0, 0)
 istop(x::Birth) = istop(x.tag)
 isbot(x::Birth) = isbot(x.tag)
-Base.show(io::IO, x::Birth) = (istop(x) | isbot(x)) ? show(io, x.tag) : print(io, "birth(", x.fc, ":", x.pc, ":", x.ec, ")")
-<=(x::Birth,y::Birth) = istop(y) || isbot(x) || x.tag == y.tag == L3e && x.fc == y.fc && x.pc == y.pc && x.ec == y.ec
+Base.show(io::IO, x::Birth) = (istop(x) | isbot(x)) ? show(io, x.tag) : print(io, "birth(", x.fc, ":", x.pc, ")")
+<=(x::Birth,y::Birth) = istop(y) || isbot(x) || x.tag == y.tag == L3e && x.fc == y.fc && x.pc == y.pc
 function join(x::Birth,y::Birth)
     x <= y && return y
     y <= x && return x
@@ -264,7 +263,7 @@ join{Ls}(p::Prod{Ls},v::Lattice) = join(p,convert(Prod{Ls},v))
 
 # ========== Interpreter
 
-const GTRACE = false
+const GTRACE = true
 const DEBUGWARN = true
 
 type Config
@@ -277,7 +276,7 @@ function Base.show(io::IO, c::Code)
     else
         lns = "???"
     end
-    print(io, "(", module_name(c.mod), ".", c.name, " at ",lns,", ", length(c.body), " statements, ", sum([length(l[1]) for l in c.linear_expr])," steps)")
+    print(io, "(", module_name(c.mod), ".", c.name, " at ",lns,", ", length(c.body), " statements)")
 end
 abstract State
 type FunState{T} <: State
@@ -313,39 +312,27 @@ end
 end=#
 
 type ExprState{T}
-    data :: Vector{Vector{Vector{T}}} # TODO inefficient
+    data :: Vector{Vector{T}}
     changed :: Bool
 end
-ExprState{T}(::Type{T}) = ExprState(Array(Vector{Vector{T}},0), false)
+ExprState{T}(::Type{T}) = ExprState(Array(Vector{T},0), false)
 function ensure_filled!{T}(s::ExprState{T}, fc::Int, c::Code)
-#    @assert length(s.data)+1 == fc
-    push!(s.data, [[bot(T) for j=1:length(c.linear_expr[i][1])] for i = 1:length(c.body)])
+    push!(s.data, [bot(T) for i = 1:length(c.body)])
 end
-function Base.getindex{T}(s::ExprState{T}, fc::Int, pc::Int, ec::Int)
-    s.data[fc][pc][ec]
-    #get!(s.data, (fc,pc,ec), bot(T))
+function Base.getindex{T}(s::ExprState{T}, fc::Int, pc::Int)
+    s.data[fc][pc]
 end
-function Base.setindex!{T}(s::ExprState{T}, v::T, fc::Int,pc::Int,ec::Int)
-    orig = s[fc,pc,ec]
+function Base.setindex!{T}(s::ExprState{T}, v::T, fc::Int,pc::Int)
+    orig = s[fc,pc]
     if !(v <= orig)
-        #s.data[(fc,pc,ec)] = join(orig, v)
-        s.data[fc][pc][ec] = join(orig, v)
+        s.data[fc][pc] = join(orig, v)
         s.changed = true
     end
-end
-function Base.getindex{T}(s::ExprState{T},fc::Int,pc::Int,ecs::AbstractArray)
-    a = Array(T, 0)
-    sizehint!(a, length(ecs))
-    for ec in ecs
-        push!(a, s[fc,pc,ec])
-    end
-    a
 end
 
 type Thread{StateT,FinalT}
     fc :: Int
     pc :: Int
-    ec :: Int
     wait_on :: Int # fc we need to continue, or 0 if none
     cycle :: Int
     state :: StateT
@@ -353,7 +340,7 @@ type Thread{StateT,FinalT}
     visited :: Set{Int} # inefficient, could be parametrized by modified state, could be a bitfield, ...
     eh_stack :: Vector{Int} # pc of handler
 end
-Thread(StateT,FinalT,f,p,e) = Thread(f,p,e,0,0,bot(StateT),bot(FinalT),Set{Int}(),Array(Int,0))
+Thread(StateT,FinalT,f,p) = Thread(f,p,0,0,bot(StateT),bot(FinalT),Set{Int}(),Array(Int,0))
 
 type Scheduler{ValueT,StateT,InitialT,FinalT}
     values :: ExprState{ValueT}
@@ -387,13 +374,13 @@ function register_fun!(sched::Scheduler, fcode::Code)
 end
 
 function Base.show(io::IO,t::Thread)
-    println(io, "abstract thread ", pointer_from_objref(t), " at ",t.fc,":",t.pc,":",t.ec, " final:", t.final)
+    println(io, "abstract thread ", pointer_from_objref(t), " at ",t.fc,":",t.pc, " final:", t.final)
     println(io, t.state)
 end
-fork(s,t) = fork(s,t,t.pc,t.ec)
-fork(s,t,pc) = fork(s,t,pc,1)
-function fork{S,F}(s::Scheduler,t::Thread{S,F},pc::Int,ec::Int)
-    child = Thread(S,F,t.fc,pc,ec)
+fork(s,t) = fork(s,t,t.pc)
+fork(s,t,pc) = fork(s,t,pc)
+function fork{S,F}(s::Scheduler,t::Thread{S,F},pc::Int)
+    child = Thread(S,F,t.fc,pc)
     child.eh_stack = copy(t.eh_stack)
     child.cycle = t.cycle
     join!(child.state, t.state)
@@ -521,7 +508,7 @@ function eval_call_gf!{V,S,I,F}(sched::Scheduler{V,S,I,F}, state, fv, args)
     end
 end
 function eval_call_code!{V,S,I,F}(sched::Scheduler{V,S,I,F},state,fcode,args,env)
-    child = Thread(S,F,0,1,1)
+    child = Thread(S,F,0,1)
     child.state, _ = join!(child.state, state)
     child.state = call_gate!(child.state)
     args = map(call_gate, args)
@@ -953,7 +940,7 @@ function eval_call!{V}(t::Thread, ::Type{Birth}, f::V, args::V...)
         f <= Const(OtherBuiltins.new_array_1d) ||
         f <= Const(OtherBuiltins.new_array_2d) ||
         f <= Const(OtherBuiltins.new_array_3d)
-        return convert(V,Birth(t.fc,t.pc, t.ec))
+        return convert(V,Birth(t.fc,t.pc))
     end
     top(V)
 end
@@ -993,79 +980,77 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
     TRACE = GTRACE
     code = sched.funs[t.fc]
     values = sched.values
-    le = code.linear_expr[t.pc]
-    if t.ec == 1 && t.pc in t.visited
-        t.pc =length(code.body)+1
+    if t.pc in t.visited
+        t.pc = length(code.body)+1
         return
     end
-    TRACE && println("Step thread ",t.fc, ":", t.pc, ":", t.ec)
-    if t.ec <= length(le[1]) # continue evaluating expr
-        e = le[1][t.ec]
-        ed = le[2][t.ec]
-        res = if t.wait_on > 0
-            if sched.done[t.wait_on]
-                final = sched.final[t.wait_on]
-                t.wait_on = 0
-            else # cycle
-                ft = fork(sched, t)
-                ft.wait_on = t.wait_on
-                ft.cycle += 1
-                t.wait_on = 0
-                final = sched.final[ft.wait_on]
-            end
-            # TODO move into function
-            t.final, _ = join!(t.final, :thrown, final.thrown)
-            t.final.must_throw = t.final.must_throw | final.must_throw
-            final.ret_val
-        elseif isa(e, Expr)
-            if e.head === :call || e.head === :call1 || e.head === :new
-                narg = length(e.args)
-                args = []
-                i = t.ec-1
-                argex = [] # debug
-                while length(args) < narg
-                    d = le[2][i]
-                    d == ed+1 && (unshift!(args, values[t.fc,t.pc,i]); unshift!(argex, le[1][i]))
-                    i -= 1
-                end
-#                @show argex
-                if e.head === :new
-                    eval_new!(t, args...)
-                else
-                    eval_call!(sched, t, args[1], args[2:end]...)
-                end
-            else
-                error("expr ? " * string(e))
-            end
-        elseif isa(e, LocalName)
-            if e === :UNKNOWN
-                top(V)
-            else
-                eval_sym(sched, t.state, code, e)
-            end
-        elseif isa(e, LambdaStaticData)
-            # canonicalize static AST into : new(Function, ast)
-            # should probably be new(Function, ast, env) but for now this is done
-            # internally
-            eval_new!(t, convert(V,Const(Function)), convert(V,Const(e)))
+    TRACE && println("Step thread ",t.fc, ":", t.pc)
+    next_pc = branch_pc = t.pc+1
+    e = code.body[t.pc]
+    res = if t.wait_on > 0
+        if sched.done[t.wait_on]
+            final = sched.final[t.wait_on]
+            t.wait_on = 0
+        else # cycle
+            ft = fork(sched, t)
+            ft.wait_on = t.wait_on
+            ft.cycle += 1
+            t.wait_on = 0
+            final = sched.final[ft.wait_on]
+        end
+        # TODO move into function
+        t.final, _ = join!(t.final, :thrown, final.thrown)
+        t.final.must_throw = t.final.must_throw | final.must_throw
+        final.ret_val
+    elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
+        args = map(i -> values[t.fc,i], code.call_args[t.pc])
+        if e.head === :new
+            eval_new!(t, args...)
         else
-            if isa(e, TopNode)
-                e = eval(Base,e.name)
-            elseif isa(e, QuoteNode)
-                e = e.value
-            end
-            eval_lit(V,e)
+            eval_call!(sched, t, args[1], args[2:end]...)
         end
-        if res === nothing
-            return
+    elseif isa(e, LocalName)
+        if e === :UNKNOWN
+            top(V)
+        else
+            eval_sym(sched, t.state, code, e)
         end
-        TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", res))
-        values[t.fc,t.pc,t.ec] = res
-        t.ec += 1
-    end;if t.ec > length(le[1]) # TODO think wether we wa
+    elseif isa(e, LambdaStaticData)
+        # canonicalize static AST into : new(Function, ast)
+        # should probably be new(Function, ast, env) but for now this is done
+        # internally
+        eval_new!(t, convert(V,Const(Function)), convert(V,Const(e)))
+    elseif isa(e,Expr) && e.head === :return
+        retval = values[t.fc,code.call_args[t.pc][1]]
+        next_pc = branch_pc = length(code.body)+1
+        retval
+    elseif isa(e,Expr) && e.head === :(=)
+        @assert next_pc == branch_pc
+        val = values[t.fc,code.call_args[t.pc][1]]
+        eval_assign!(sched, t, e.args[1]::LocalName, val)
+        val
+    elseif isa(e,Expr) && e.head === :line || isa(e,LineNumberNode)
+        convert(V,Const(nothing))
+    elseif isa(e,Expr)
+        dump(e)
+        error("unknown expr")
+    else
+        if isa(e, TopNode)
+            e = eval(Base,e.name)
+        elseif isa(e, QuoteNode)
+            e = e.value
+        end
+        eval_lit(V,e)
+    end
+    if res === nothing # TODO find a best way to express not done
+        return
+    end
+    TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", res))
+    values[t.fc,t.pc] = res
+    t.pc = next_pc
+    #=
         #    else
         res = values[t.fc,t.pc,t.ec-1]
-        t.ec = 1
         stmt = code.body[t.pc]
         TRACE && (print("Result of ");Meta.show_sexpr(stmt);println(" : ", res))
         next_pc = t.pc+1
@@ -1075,7 +1060,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
         elseif isa(stmt, SymbolNode) || isa(stmt, GenSym) || isa(stmt,Symbol) || isa(stmt, NewvarNode)
         elseif isa(stmt,LineNumberNode) || isa(stmt,LabelNode)
         elseif stmt.head === :return
-            next_pc = branch_pc = length(code.body)+1
+
         elseif stmt.head === :gotoifnot
             branch_pc = code.label_pc[stmt.args[2]::Int+1]
             if res <= Const(true)
@@ -1113,8 +1098,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
         t.pc = next_pc
         if done(sched, t)
             join!(t.final, :ret_val, res)
-        end
-    end
+        end=#
     nothing
 end
 
@@ -1140,8 +1124,7 @@ function step!(s::Scheduler)
         s.threads[n+1].fc == t.fc &&
         s.threads[n+1].cycle == t.cycle &&
         s.threads[n+1].wait_on == t.wait_on &&
-        s.threads[n+1].pc == t.pc &&
-        s.threads[n+1].ec == t.ec
+        s.threads[n+1].pc == t.pc
         k+=1
         t.state,chg = join!(t.state, s.threads[n+1].state)
         t.final,chg2 = join!(t.final, s.threads[n+1].final)
@@ -1275,7 +1258,7 @@ function linearize!(e,v,ds,d)
     end
     v,ds
 end
-function linearize_stmt!(stmt,v,ds)
+#=function linearize_stmt!(stmt,v,ds)
     if isa(stmt,LabelNode) || isa(stmt,LineNumberNode) || #TODO enterleave
         isa(stmt,Expr) && (stmt.head === :line || stmt.head === :enter || stmt.head === :leave)
         linearize!(nothing,v,ds,0)
@@ -1295,6 +1278,31 @@ function linearize_stmt!(stmt,v,ds)
         linearize!(stmt, v, ds, 0)
     end
     v,ds
+    end=#
+
+function linearize_stmt!(stmt,body,args_pc)
+    if isa(stmt,Expr) && stmt.head === :call
+        pcs = Int[]
+        for arg in stmt.args
+            linearize_stmt!(arg, body, args_pc)
+            push!(pcs, length(body))
+        end
+        push!(body,stmt)
+        push!(args_pc, tuple(pcs...))
+    elseif isa(stmt,Expr) && stmt.head === :(=)
+        linearize_stmt!(stmt.args[2],body,args_pc)
+        apc = length(body)
+        push!(body,stmt)
+        push!(args_pc, (apc,))
+    elseif isa(stmt,Expr) && stmt.head in (:return, :gotoifnot)
+        linearize_stmt!(stmt.args[1],body,args_pc)
+        apc = length(body)
+        push!(body,stmt)
+        push!(args_pc, (apc,))
+    else
+        push!(body,stmt)
+        push!(args_pc,())
+    end
 end
 
 const _code_cache = Dict{Any,Code}()
@@ -1307,7 +1315,18 @@ function code_from_ast(linf,tenv,sig)
     mod = linf.module
     ast = Base.uncompressed_ast(linf)
     TRACE && @show ast
-    body = ast.args[3].args
+    orig_body = ast.args[3].args
+
+    body = Any[]
+    args_pc = Tuple{Vararg{Int}}[]
+    for stmt in orig_body
+        linearize_stmt!(stmt, body, args_pc)
+    end
+    for (i,(b,apc)) in enumerate(zip(body,args_pc))
+        println(i, ") ", b, " -- ", apc)
+    end
+    #exit()
+    
     label_pc = Array(Int, 0)
     for pc = 1:length(body)
         if isa(body[pc], LabelNode)
@@ -1363,8 +1382,7 @@ function code_from_ast(linf,tenv,sig)
     end
     union!(locs,capt)
     push!(locs, :the_exception) #TODO ugh
-    lin = [linearize_stmt!(e,[],Int[]) for e in body]
-    c = Code(mod, fun_name, body, label_pc, locs, args, lin, isva, tenv, capt, decltypes)
+    c = Code(mod, fun_name, body, args_pc, label_pc, locs, args, isva, tenv, capt, decltypes)
     for i=1:2:length(tenv)
         push!(c.locals, tenv[i].name)
     end
@@ -1582,16 +1600,18 @@ end
 G(z) = z-2
 
 function K()
-    x = 3
+#=    x = 3
     while UNKNOWN
         x = x+1
     end
     return x
     x = 3
     y = G(x+1)
-    return y
+    return y=#
     y = (x+1)*x
 end
+
+GreenFairy.RUN(K,())
 
 FA(n) = n > 0 ? FA(n-1) : UNKNOWN ? throw(n) : n
 FB(n) = throw(n)
