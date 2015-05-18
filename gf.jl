@@ -263,18 +263,18 @@ join{Ls}(p::Prod{Ls},v::Lattice) = join(p,convert(Prod{Ls},v))
 
 # ========== Interpreter
 
-const GTRACE = true
-const DEBUGWARN = true
+const GTRACE = false
+const DEBUGWARN = false
 
 type Config
     join_strat :: Symbol
 end
 function Base.show(io::IO, c::Code)
     ln = c.body[1]
-    if ln.head == :line
+    if isa(ln, Expr) && ln.head == :line
         lns = @sprintf("%s:%d", ln.args[2], ln.args[1])
     else
-        lns = "???"
+        lns = string("??? (", ln, ")")
     end
     print(io, "(", module_name(c.mod), ".", c.name, " at ",lns,", ", length(c.body), " statements)")
 end
@@ -723,10 +723,11 @@ end
 
 # TODO make this correct (float types etc), add exception info
 const INTR_TYPES = [
-                    (Int, [Base.add_int, Base.sub_int,Base.check_top_bit, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.ashr_int, Base.checked_ssub, Base.checked_sadd, Base.and_int, Base.flipsign_int, Base.shl_int, Base.lshr_int, Base.xor_int, Base.and_int, Base.neg_int, Base.or_int, Base.sdiv_int, Base.cttz_int, Core.sizeof, Base.rint_llvm]),
-                    (UInt, [Base.udiv_int, Base.urem_int]),
-                    (Float64, [Base.add_float, Base.div_float, Base.mul_float, Base.ceil_llvm, Base.sub_float, Base.neg_float, Base.abs_float, Base.sqrt_llvm]),
-                    (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float, Base.issubtype, Base.isa, Base.isdefined, Base.is]),
+                    #(Int, [Base.add_int, Base.sub_int,Base.check_top_bit, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.ashr_int, Base.checked_ssub, Base.checked_sadd, Base.and_int, Base.flipsign_int, Base.shl_int, Base.lshr_int, Base.xor_int, Base.and_int, Base.neg_int, Base.or_int, Base.sdiv_int, Base.cttz_int, Core.sizeof, Base.rint_llvm]),
+                    #(UInt, [Base.udiv_int, Base.urem_int]),
+                    #(Float64, [Base.add_float, Base.div_float, Base.mul_float, Base.ceil_llvm, Base.sub_float, Base.neg_float, Base.abs_float, Base.sqrt_llvm]),
+                    #(Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float, Base.issubtype, Base.isa, Base.isdefined, Base.is]),
+                    (Bool, [Base.isa, Base.isdefined, Base.is, Base.issubtype]),
                     (DataType, [Base.fieldtype, Base.apply_type]),
                     (UnionType, [Base.Union]),
                     (SimpleVector, [Base.svec]),
@@ -1023,13 +1024,46 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
     elseif isa(e,Expr) && e.head === :return
         retval = values[t.fc,code.call_args[t.pc][1]]
         next_pc = branch_pc = length(code.body)+1
+        join!(t.final, :ret_val, retval)
         retval
+    elseif isa(e,GotoNode)
+        next_pc = branch_pc = code.label_pc[e.label::Int+1]
+        convert(V,Const(nothing))
+    elseif isa(e,Expr) && e.head === :gotoifnot
+        branch_pc = code.label_pc[e.args[2]::Int+1]
+        val = values[t.fc,code.call_args[t.pc][1]]
+        if val <= Const(true)
+            branch_pc = next_pc
+        elseif val <= Const(false)
+            next_pc = branch_pc
+        end
+        val
     elseif isa(e,Expr) && e.head === :(=)
         @assert next_pc == branch_pc
         val = values[t.fc,code.call_args[t.pc][1]]
         eval_assign!(sched, t, e.args[1]::LocalName, val)
         val
-    elseif isa(e,Expr) && e.head === :line || isa(e,LineNumberNode)
+    elseif isa(e,Expr) && e.head == :enter
+        push!(t.eh_stack, code.label_pc[e.args[1]::Int+1])
+        convert(V,Const(nothing))
+    elseif isa(e,Expr) && e.head == :leave
+        if !isbot(t.final.thrown) # could throw
+            handler_pc = t.eh_stack[end]
+            ft = fork(sched, t, handler_pc) # TODO this is not correct, we should join all state inside the handler (more fancy : remember the thrown points and join from here)
+            ft.final.thrown = bot(Ty)
+            ft.final.must_throw = false
+            eval_assign!(sched, ft, :the_exception, t.final.thrown)
+            t.final.thrown = bot(Ty)
+            if t.final.must_throw # thrown for sure
+                next_pc = branch_pc = length(code.body)+1
+            end
+            t.final.must_throw = false
+        end
+        for i=1:(e.args[1]::Int)
+            pop!(t.eh_stack)
+        end
+        convert(V,Const(nothing))
+    elseif isa(e,Expr) && e.head in (:line,:boundscheck,:meta) || isa(e,LineNumberNode)
         convert(V,Const(nothing))
     elseif isa(e,Expr)
         dump(e)
@@ -1047,6 +1081,10 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
     end
     TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", res))
     values[t.fc,t.pc] = res
+    push!(t.visited, t.pc)
+    if next_pc != branch_pc
+        ft = fork(sched, t, branch_pc)
+    end
     t.pc = next_pc
     #=
         #    else
@@ -1056,18 +1094,10 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
         next_pc = t.pc+1
         branch_pc = next_pc
         if isa(stmt, GotoNode)
-            next_pc = branch_pc = code.label_pc[stmt.label::Int+1]
         elseif isa(stmt, SymbolNode) || isa(stmt, GenSym) || isa(stmt,Symbol) || isa(stmt, NewvarNode)
         elseif isa(stmt,LineNumberNode) || isa(stmt,LabelNode)
         elseif stmt.head === :return
-
         elseif stmt.head === :gotoifnot
-            branch_pc = code.label_pc[stmt.args[2]::Int+1]
-            if res <= Const(true)
-                branch_pc = next_pc
-            elseif res <= Const(false)
-                next_pc = branch_pc
-            end
         elseif stmt.head == :enter
             push!(t.eh_stack, code.label_pc[stmt.args[1]::Int+1])
         elseif stmt.head == :leave
@@ -1219,69 +1249,8 @@ function Base.show(io::IO, s::Scheduler)
     println(io, "======")
 end
 
-function linearize!(e,v,ds,d)
-    if isa(e, GlobalRef)
-        push!(v,:UNKNOWN) #TODO
-        push!(ds,d)
-    elseif isa(e, SymbolNode)
-        push!(v, e.name)
-        push!(ds,d)
-    elseif !isa(e, Expr)
-        push!(v,e)
-        push!(ds,d)
-    else
-        if !(e.head === :call || e.head ===:call1 || e.head === :new || e.head === :copyast || e.head === :static_typeof || e.head === :the_exception || e.head === :&)
-            Meta.show_sexpr(e)
-            println()
-            error("not a call " * string(e) * " : " * string(v))
-        end
-        if e.head == :the_exception
-            push!(v, :the_exception) # TODO name collision ?
-            push!(ds,d)
-            return v,ds
-        elseif e.head === :copyast # TODO
-            push!(v, :UNKNOWN)
-            push!(ds,d)
-            return v,ds
-        elseif e.head === :static_typeof
-            push!(v, :UNKNOWN)
-            push!(ds,d)
-            return v,ds
-        elseif e.head === :& # TODO
-            return linearize!(e.args[1], v, ds, d)
-        end
-        for a in e.args
-            linearize!(a, v, ds, d+1)
-        end
-        push!(v,e)
-        push!(ds,d)
-    end
-    v,ds
-end
-#=function linearize_stmt!(stmt,v,ds)
-    if isa(stmt,LabelNode) || isa(stmt,LineNumberNode) || #TODO enterleave
-        isa(stmt,Expr) && (stmt.head === :line || stmt.head === :enter || stmt.head === :leave)
-        linearize!(nothing,v,ds,0)
-    elseif isa(stmt,GotoNode)
-        linearize!(nothing,v,ds,0)
-    elseif isa(stmt,NewvarNode) # TODO correct ?
-        linearize!(nothing, v,ds,0)
-    elseif isa(stmt,SymbolNode)
-        linearize!(stmt.name, v,ds,0)
-    elseif isa(stmt,Expr) && (stmt.head === :boundscheck || stmt.head === :type_goto || stmt.head === :meta) # TODO
-        linearize!(nothing, v,ds,0)
-    elseif isa(stmt,Expr) && stmt.head === :(=)
-        linearize!(stmt.args[2], v, ds, 0)
-    elseif isa(stmt,Expr) && (stmt.head === :return || stmt.head === :gotoifnot)
-        linearize!(stmt.args[1], v, ds, 0)
-    else
-        linearize!(stmt, v, ds, 0)
-    end
-    v,ds
-    end=#
-
 function linearize_stmt!(stmt,body,args_pc)
-    if isa(stmt,Expr) && stmt.head === :call
+    if isa(stmt,Expr) && stmt.head in (:call,:call1,:new)
         pcs = Int[]
         for arg in stmt.args
             linearize_stmt!(arg, body, args_pc)
@@ -1299,6 +1268,19 @@ function linearize_stmt!(stmt,body,args_pc)
         apc = length(body)
         push!(body,stmt)
         push!(args_pc, (apc,))
+    elseif isa(stmt,SymbolNode)
+        push!(body,stmt.name)
+        push!(args_pc, ())
+    elseif isa(stmt,Expr) && stmt.head === :copyast
+        push!(body,stmt.args[1])
+        push!(args_pc,())
+    elseif isa(stmt,Expr) && stmt.head === :static_typeof
+        linearize_stmt!(Expr(:call, TopNode(:typeof), stmt.args[1]), body, args_pc)
+    elseif isa(stmt,Expr) && stmt.head === :type_goto
+        warn("type_goto is not supported (and never will ?)")
+    elseif isa(stmt,Expr) && stmt.head === :the_exception
+        push!(body, :the_exception) # TODO name collision, make this a proper part of state
+        push!(args_pc,())
     else
         push!(body,stmt)
         push!(args_pc,())
@@ -1322,10 +1304,9 @@ function code_from_ast(linf,tenv,sig)
     for stmt in orig_body
         linearize_stmt!(stmt, body, args_pc)
     end
-    for (i,(b,apc)) in enumerate(zip(body,args_pc))
+    #=for (i,(b,apc)) in enumerate(zip(body,args_pc))
         println(i, ") ", b, " -- ", apc)
-    end
-    #exit()
+    end=#
     
     label_pc = Array(Int, 0)
     for pc = 1:length(body)
@@ -1608,9 +1589,15 @@ function K()
     x = 3
     y = G(x+1)
     return y=#
-    y = (x+1)*x
+    x = 3
+    if true
+        x = 55
+    else
+        x = 22
+    end
+    x
 end
-
+K() = Base.typeinf(UNKNOWN,UNKNOWN,UNKNOWN)
 GreenFairy.RUN(K,())
 
 FA(n) = n > 0 ? FA(n-1) : UNKNOWN ? throw(n) : n
