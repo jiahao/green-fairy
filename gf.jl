@@ -797,7 +797,7 @@ const INTR_TYPES = [
                     (Any,[Core.eval]),
                     (Int32, [OtherBuiltins.isleaftype])
                     ]
-const FA_INTR = [Base.trunc_int, Base.sext_int, Base.uitofp, Base.sitofp, Base.fptosi, Base.box, Base.unbox, OtherBuiltins.new, Base.checked_fptosi, Base.checked_fptoui]
+const FA_INTR = [Base.trunc_int, Base.sext_int, Base.zext_int, Base.checked_trunc_uint, Base.checked_trunc_sint, Base.uitofp, Base.sitofp, Base.fptosi, Base.box, Base.unbox, OtherBuiltins.new, Base.checked_fptosi, Base.checked_fptoui]
 
 function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Ty}, f::V, args::V...)
     if length(args) >= 1
@@ -886,16 +886,7 @@ function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Ty}, f::V, args::V...
         # TODO return bot for wrong fields
         return args[3]
     end
-    # first argument is return type
-    if  f <= Const(Base.checked_trunc_uint) ||
-        f <= Const(Base.checked_trunc_sint) ||
-        f <= Const(Base.zext_int)
-        cty = convert(Const,args[1])
-        istop(cty) && return top(V)
-        return convert(V,Ty(cty.v))
-    end
     if f <= Const(Base.ccall)
-        # TODO add known ccalls here
         retty = convert(Const,args[2])
         istop(retty) || return convert(V,Ty(retty.v))
     end
@@ -934,7 +925,7 @@ function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Ty}, f::V, args::V...
         end
         if !istop(convert(Const,f))
             fv = convert(Const,f)
-            isdefined(fv,:code) &&fv.code.name === :anonymous && return top(V)
+            isdefined(fv,:code) && fv.code.name === :anonymous && return top(V)
             warn(@sprintf("Unknown builtin type %s %s with args %s", f, args, f))
         end
     end
