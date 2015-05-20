@@ -360,19 +360,19 @@ end
 function same_state{T}(s::StateCell{T},pc::Int,d::T)
     d <= s.val[pc] && s.val[pc] <= d # TODO ugh
 end
-type LocalStore2{V}
+type LocalStore{V}
     locals :: Dict{LocalName,StateCell{V}}
     len :: Int
 end
-function Base.getindex(s::LocalStore2, pc)
+function Base.getindex(s::LocalStore, pc)
     [ k => v[pc] for (k,v) in  s.locals ]
 end
-LocalStore2{V}(::Type{V}, n::Int) = LocalStore2(Dict{LocalName,StateCell{V}}(), n)
+LocalStore{V}(::Type{V}, n::Int) = LocalStore(Dict{LocalName,StateCell{V}}(), n)
 immutable LocalStateDiff{V}
     name :: LocalName
     val :: V
 end
-function propagate!{V}(s::LocalStore2{V},pc::Int,next::Int,d::Vector{LocalStateDiff{V}})
+function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,d::Vector{LocalStateDiff{V}})
     for lsd in d
         if !haskey(s.locals, lsd.name)
             s.locals[lsd.name] = StateCell(V, s.len)
@@ -389,14 +389,14 @@ function propagate!{V}(s::LocalStore2{V},pc::Int,next::Int,d::Vector{LocalStateD
     end
     chgd
 end
-function eval_local{V}(s::LocalStore2{V}, pc::Int, name::LocalName)
+function eval_local{V}(s::LocalStore{V}, pc::Int, name::LocalName)
     if !haskey(s.locals, name)
         bot(V)
     else
         s.locals[name].val[pc]
     end
 end
-function same_state{V}(s::LocalStore2{V}, pc::Int, d)
+function same_state{V}(s::LocalStore{V}, pc::Int, d)
     for lsd in d
         if !haskey(s.locals, lsd.name)
             return false
@@ -417,11 +417,11 @@ function same_state{V}(s::LocalStore2{V}, pc::Int, d)
     true
 end
 immutable State{LV}
-    funs :: Vector{LocalStore2{LV}}
+    funs :: Vector{LocalStore{LV}}
 end
-State{V}(::Type{V}) = State(Array(LocalStore2{V}, 0))
+State{V}(::Type{V}) = State(Array(LocalStore{V}, 0))
 function ensure_filled!{V}(s::State{V}, fc::Int, code::Code)
-    push!(s.funs, LocalStore2(V, length(code.body)))
+    push!(s.funs, LocalStore(V, length(code.body)))
 end
 eval_local(s::State, fc::Int, pc::Int, name::LocalName) = eval_local(s.funs[fc], pc, name)
 propagate!(s::State,fc::Int,pc::Int,next::Int,sd) = propagate!(s.funs[fc],pc,next,sd)
@@ -487,19 +487,6 @@ function fork(s::Scheduler,t::Thread,pc::Int)
     child
 end
 
-immutable LocalStore{V} <: Lattice
-    map :: Dict{LocalName,V}
-    LocalStore(m::Dict{LocalName,V} = Dict{LocalName,V}()) = new(m)
-end
-bot{V}(::Type{LocalStore{V}}) = LocalStore{V}()
-function <={V}(s::LocalStore{V},s2::LocalStore{V})
-    for (k,v) in s.map
-        haskey(s2.map, k) || return false
-        s.map[k] <= s2.map[k] || return false
-    end
-    true
-end
-
 function show_dict(io::IO,s)
     ntop = 0
     nbot = 0
@@ -530,42 +517,6 @@ function show_dict(io::IO,s)
         end
         println(io, nbot>1?")":"", " : bot")
     end
-end
-fork{V}(l::LocalStore{V}) = LocalStore{V}(copy(l.map))
-function join!{V}(s::LocalStore{V}, s2::LocalStore{V})
-    changed = false
-    for (k,v) in s.map
-        haskey(s2.map, k) || continue
-        newv = join(v, s2.map[k])
-        s.map[k] = newv
-        newv <= v || (changed = true)
-    end
-    for (k,v) in s2.map
-        haskey(s.map, k) && continue
-        changed = true
-        s.map[k] = s2.map[k]
-    end
-    s, changed
-end
-join!{V}(s::LocalStore{V}, v::Pair) = join!(s, v.first=>convert(V,v.second))
-function join!{T<:LocalName,V}(s::LocalStore{V}, v::Pair{T,V})
-    k = v.first
-    val = v.second
-    isbot(val) && return s, false
-    if !haskey(s.map, k)
-        s.map[k] = val
-        return s, true
-    end
-    oldval = s.map[k]
-    if val <= oldval
-        return s,false
-    end
-    s.map[k] = join(val, oldval)
-    s, true
-end
-function eval_local{V}(s::LocalStore{V}, name::LocalName)
-    haskey(s.map, name) || return bot(V)
-    s.map[name]
 end
 
 meet_ext(v::Lattice, v2::Lattice) = v
@@ -694,9 +645,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, fun::V, args::V...) #
         for i=3:length(args)
             if args[i] <= Ty(Tuple)
                 l = convert(Const, eval_call!(sched, t, V, convert(V,Const(Base.nfields)), args[i]))
-                println("XX ", i, " ", args[i], " ", l)
                 istop(l) && return top(V)
-                @show l args
                 for k=1:l.v
                     push!(actual_args, eval_call!(sched, t, V, convert(V,Const(Base.getfield)), args[i], convert(V,Const(k))))
                 end
@@ -706,7 +655,6 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, fun::V, args::V...) #
             end
         end
         f = convert(Const,fun)
-        @show actual_args args
         args = tuple(actual_args...)
     end
     if !istop(f) && (isa(f.v,Function) && isgeneric(f.v) || !isa(f.v,Function) && !isa(f.v,IntrinsicFunction))
@@ -897,7 +845,6 @@ function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Ty}, f::V, args::V...
         return convert(V,Const(argtypes[1].ty))
     end
     if f <= Const(Base.tuple)
-        @show argtypes
         return convert(V,Ty(Tuple{map(a->a.ty,argtypes)...}))
     end
     if f <= Const(Base.arraylen) || f <= Const(Base.arraysize)
@@ -1583,22 +1530,16 @@ function join!{V}(s::ThreadState{V}, s2::ThreadState{V})
     s, chg
 end
 
-export Prod,Sign,Const,Ty,Birth,LocalStore,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ThreadState,ConstCode,LocalStore2,State
+export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ThreadState,ConstCode,LocalStore,State
 
 # == client
 
 module Analysis
 using GreenFairy
 const ValueT = Prod{Tuple{Const,Ty,Sign,Birth,ConstCode{Ty}}}
-const StateT = ThreadState{LocalStore{ValueT}}
 const FinalT = FinalState{ValueT}
 make_sched(conf) = Scheduler(ExprState(ValueT),State(ValueT),FunState(FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
 end
-#@show code_typed(join, (Analysis.ValueT,Analysis.ValueT))
-#@show code_typed(step!,(Analysis.ThreadT,Vector{Analysis.ThreadT},Config))
-#@show code_typed(eval_local, (Analysis.StoreT,Any))
-#@show code_llvm(top, (Type{Analysis.ValueT},))
-#exit()
 
 function run(f::Function, args)
     sched = Analysis.make_sched(Config(:always))
@@ -1625,15 +1566,6 @@ function RUN(F::Function,args::ANY)
     read(STDIN,Char)
     sched
 end
-#@show code_typed(eval_call!, (Analysis.ThreadT,Type{Analysis.ValueT},Analysis.ValueT,Analysis.ValueT,Analysis.ValueT))
-#exit()
-#@time RUN(RUN, (Function,Any))
-#file for i=1:10; RUN(); end
-#Base.Profile.print()
-#@time RUN()
-#@time (niter,maxthr,ss) = RUN()
-#@time (niter,maxthr,ss) = RUN()
-#Z = @time [RUN()[1] for i=1:1000000]
 DOIT() = GreenFairy.RUN(DOIT, ())
 end
 #=sched = GreenFairy.RUN(GreenFairy.F, ())
