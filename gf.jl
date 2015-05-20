@@ -255,10 +255,10 @@ convert{L}(::Type{Prod{L}}, y::Prod{L})=y
     :(prod(tuple($(args...))))
 end
 
-function eval_local(p::Prod,name::LocalName)
+#=function eval_local(p::Prod,name::LocalName)
     prod(map(v -> eval_local(v, name), p.values))
 end
-eval_local{T<:Lattice}(::T,::LocalName) = top(T)
+eval_local{T<:Lattice}(::T,::LocalName) = top(T)=#
 join{Ls}(p::Prod{Ls},v::Lattice) = join(p,convert(Prod{Ls},v))
 
 # ========== Interpreter
@@ -329,6 +329,79 @@ function Base.setindex!{T}(s::ExprState{T}, v::T, fc::Int,pc::Int)
         s.changed = true
     end
 end
+function join!(s::ExprState, fc::Int, pc::Int, args...)
+    s.data[fc][pc], chg = join!(s.data[fc][pc], args...)
+    chg
+end
+
+# naive impl
+type StateCell{T}
+    val :: Vector{T}
+end
+StateCell{T}(::Type{T},n::Int) = StateCell(T[bot(T) for i in 1:n+1])
+function propagate!{T}(s::StateCell{T},pc::Int,next::Int)
+    if s.val[pc] <= s.val[next]
+        false
+    else
+        s.val[next] = join(s.val[next],s.val[pc])
+        true
+    end
+end
+function propagate!{T}(s::StateCell{T},pc::Int,next::Int,d::T)
+    if d <= s.val[next]
+        false
+    else
+        s.val[next] = join(s.val[next],d)
+        true
+    end
+end
+
+type LocalStore2{V}
+    locals :: Dict{LocalName,StateCell{V}}
+    len :: Int
+end
+LocalStore2{V}(::Type{V}, n::Int) = LocalStore2(Dict{LocalName,StateCell{V}}(), n)
+immutable LocalStateDiff{V}
+    name :: LocalName
+    val :: V
+end
+function apply_diff!{V}(s::LocalStore2{V}, pc::Int, sd::LocalStateDiff{V})
+    if !haskey(s.locals, sd.name)
+        s.locals[sd.name] = StateCell(V, s.len)
+    end
+    apply_diff!(s.locals[sd.name], pc, sd.val)
+end
+function propagate!{V}(s::LocalStore2{V},pc::Int,next::Int,d::Vector{LocalStateDiff{V}})
+    for lsd in d
+        if !haskey(s.locals, lsd.name)
+            s.locals[lsd.name] = StateCell(V, s.len)
+        end
+    end
+    chgd = false
+    for (k,v) in s.locals
+        idx = findlast(lsd->lsd.name == k, d)
+        if idx > 0
+            chgd |= propagate!(v,pc,next,d[idx].val)
+        else
+            chgd |= propagate!(v,pc,next)
+        end
+    end
+    chgd
+end
+function eval_local{V}(s::LocalStore2{V}, pc::Int, name::LocalName)
+    if !haskey(s.locals, name)
+        bot(V)
+    else
+        s.locals[name].val[pc]
+    end
+end
+immutable LS3{V}
+    v :: Vector{LocalStore2{V}}
+end
+LS3{V}(::Type{V}) = LS3(Array(LocalStore2{V}, 0))
+function ensure_filled!{V}(s::LS3{V}, fc::Int, code::Code)
+    push!(s.v, LocalStore2(V, length(code.body)))
+end
 
 type Thread{StateT,FinalT}
     fc :: Int
@@ -345,6 +418,7 @@ Thread(StateT,FinalT,f,p) = Thread(f,p,0,0,bot(StateT),bot(FinalT),Set{Int}(),Ar
 type Scheduler{ValueT,StateT,InitialT,FinalT}
     values :: ExprState{ValueT}
     initial :: FunState{InitialT}
+    states
     final :: FunState{FinalT}
     done :: Vector{Bool}
     threads :: Vector{Thread{StateT,FinalT}}
@@ -366,6 +440,7 @@ function register_fun!(sched::Scheduler, fcode::Code)
         fc = length(sched.funs)
         ensure_filled!(sched.values, fc, fcode)
         ensure_filled!(sched.final, fc, fcode)
+        ensure_filled!(sched.states, fc, fcode)
         ensure_filled!(sched.initial, fc, fcode)
         push!(sched.done, false)
         push!(sched.called_by, Set{Any}())
@@ -680,7 +755,7 @@ function eval_call!{V}(t::Thread, ::Type{Sign}, f::V, args::V...)
     if f <= Const(Base.add_int) || f <= Const(Base.checked_sadd)
         length(args) == 2 || return bot(V)
         args[1] <= Sign(0) && args[2] <= Sign(0) && return convert(V,Sign(0)) # +(0 0) = 0
-        for sgn in (-1,1) # +(+ 0) = +(0 +) = +(+ +) = + and +(- 0) = +(0 -) = +(- -) = -
+        for sgn in (-1,1) # (+|0)+(+|0) == + and (-|0)+(-|0) == -
             (args[1] <= Sign(sgn) || args[1] <= Sign(0)) &&
             (args[2] <= Sign(sgn) || args[2] <= Sign(0)) &&
             return convert(V,Sign(sgn))
@@ -746,6 +821,7 @@ function eval_call!{V}(t::Thread, ::Type{Ty}, f::V, args::V...)
             end
         end
     end
+    
     # cglobal and typassert take the return type as second argument ...
     if f <= Const(Base.cglobal)
         cty = convert(Const, args[2])
@@ -959,17 +1035,18 @@ function eval_call!{V,EV}(t::Thread, ::Type{ConstCode{EV}}, f::V, args::V...)
     top(V)
 end
 
-function eval_assign!{V}(s,t,name,res::V)
-    t.state, changed = join!(t.state, :locals, name => res)
-    if changed
+function eval_assign!{V}(sched,sd,name,res::V)
+    #join!(t.state, :locals, name => res)
+    push!(sd, LocalStateDiff(name, res))
+    #=if changed
         empty!(t.visited)
-    end
+    end=#
     nothing
 end
 
-function eval_sym {V}(sched::Scheduler{V},state,code,e)
+function eval_sym {V}(sched::Scheduler{V},t,code,e)
     if e in code.locals || isa(e,GenSym)
-        eval_local(state, e)
+        eval_local(sched.states.v[t.fc], t.pc, e)
     elseif isa(e,Symbol) && isconst(code.mod,e)
         eval_lit(V, eval(code.mod,e))
     else
@@ -981,10 +1058,9 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
     TRACE = GTRACE
     code = sched.funs[t.fc]
     values = sched.values
-    if t.pc in t.visited
-        t.pc = length(code.body)+1
-        return
-    end
+    #state = sched.states.v[t.fc,t.pc]
+    sd = Array(LocalStateDiff{V}, 0)
+    
     TRACE && println("Step thread ",t.fc, ":", t.pc)
     next_pc = branch_pc = t.pc+1
     e = code.body[t.pc]
@@ -1014,7 +1090,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
         if e === :UNKNOWN
             top(V)
         else
-            eval_sym(sched, t.state, code, e)
+            eval_sym(sched, t, code, e)
         end
     elseif isa(e, LambdaStaticData)
         # canonicalize static AST into : new(Function, ast)
@@ -1041,7 +1117,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
     elseif isa(e,Expr) && e.head === :(=)
         @assert next_pc == branch_pc
         val = values[t.fc,code.call_args[t.pc][1]]
-        eval_assign!(sched, t, e.args[1]::LocalName, val)
+        eval_assign!(sched, sd, e.args[1]::LocalName, val)
         val
     elseif isa(e,Expr) && e.head == :enter
         push!(t.eh_stack, code.label_pc[e.args[1]::Int+1])
@@ -1081,10 +1157,27 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread{S}, conf::Config)
     end
     TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", res))
     values[t.fc,t.pc] = res
-    push!(t.visited, t.pc)
+
+    chgd = propagate!(sched.states.v[t.fc], t.pc, next_pc, sd)
+    #=chgd = false
+    for lsd in sd
+        #chgd |= join!(sched.states, t.fc, next_pc, :locals, lsd.name => lsd.val)
+        chgd |= apply_diff!(sched.states.v[t.fc], next_pc, lsd)
+    end=#
+    @show sched.states
+
     if next_pc != branch_pc
-        ft = fork(sched, t, branch_pc)
+        branch_chgd = propagate!(sched.states.v[t.fc], t.pc, branch_pc, sd)
+        if branch_chgd || values.changed
+            ft = fork(sched, t, branch_pc)
+        end
     end
+    
+    if !chgd && !values.changed
+        next_pc = length(code.body)+1
+    end
+    values.changed = false
+    
     t.pc = next_pc
     nothing
 end
@@ -1107,7 +1200,7 @@ function step!(s::Scheduler)
     n = 1
     t = s.threads[n]
     k = 0
-    while n < length(s.threads) &&
+    #=while n < length(s.threads) &&
         s.threads[n+1].fc == t.fc &&
         s.threads[n+1].cycle == t.cycle &&
         s.threads[n+1].wait_on == t.wait_on &&
@@ -1121,7 +1214,7 @@ function step!(s::Scheduler)
             union!(t.visited, s.threads[n+1].visited)
         end
         deleteat!(s.threads, n+1)
-    end
+    end=#
     try
         step!(s, t, s.config)
     catch x
@@ -1258,6 +1351,8 @@ function code_from_ast(linf,tenv,sig)
 
     body = Any[]
     args_pc = Tuple{Vararg{Int}}[]
+    sizehint!(body,length(orig_body))
+    sizehint!(args_pc,length(orig_body))
     for stmt in orig_body
         linearize_stmt!(stmt, body, args_pc)
     end
@@ -1423,7 +1518,7 @@ function Base.show(io::IO, s::ThreadState)
 end
 top{L}(::Type{ThreadState{L}}) = ThreadState(top(L))
 bot{L}(::Type{ThreadState{L}}) = ThreadState(bot(L))
-eval_local(s::ThreadState, name::LocalName) = eval_local(s.locals, name)
+eval_local(s::ThreadState, pc::Int, name::LocalName) = eval_local(s.locals, pc, name)
 <=(s::ThreadState,s2::ThreadState) = s.locals <= s2.locals
 function call_gate!(s::ThreadState)
     empty!(s.locals.map)
@@ -1454,7 +1549,7 @@ function join!{V}(s::ThreadState{V}, s2::ThreadState{V})
     s, chg
 end
 
-export Prod,Sign,Const,Ty,Birth,LocalStore,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ThreadState,ConstCode
+export Prod,Sign,Const,Ty,Birth,LocalStore,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ThreadState,ConstCode,LocalStore2,LS3
 
 # == client
 
@@ -1463,7 +1558,7 @@ using GreenFairy
 const ValueT = Prod{Tuple{Const,Ty,Sign,Birth,ConstCode{Ty}}}
 const StateT = ThreadState{LocalStore{ValueT}}
 const FinalT = FinalState{ValueT}
-make_sched(conf) = Scheduler(ExprState(ValueT),FunState(StateT),FunState(FinalT),Array(Bool,0),Array(Thread{StateT,FinalT},0),Array(Thread{StateT,FinalT},0),conf,Array(Set{Any},0),Array(Code,0))
+make_sched(conf) = Scheduler(ExprState(ValueT),FunState(StateT),LS3(ValueT),FunState(FinalT),Array(Bool,0),Array(Thread{StateT,FinalT},0),Array(Thread{StateT,FinalT},0),conf,Array(Set{Any},0),Array(Code,0))
 end
 #@show code_typed(join, (Analysis.ValueT,Analysis.ValueT))
 #@show code_typed(step!,(Analysis.ThreadT,Vector{Analysis.ThreadT},Config))
@@ -1547,14 +1642,12 @@ function K()
     y = G(x+1)
     return y=#
     x = 3
-    if true
-        x = 55
-    else
-        x = 22
+    while UNKNOWN
+        x = 5
     end
     x
 end
-K() = Base.typeinf(UNKNOWN,UNKNOWN,UNKNOWN)
+#K() = Base.typeinf(UNKNOWN,UNKNOWN,UNKNOWN)
 GreenFairy.RUN(K,())
 
 FA(n) = n > 0 ? FA(n-1) : UNKNOWN ? throw(n) : n
