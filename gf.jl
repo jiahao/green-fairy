@@ -108,7 +108,7 @@ ConstCode{E}(::Type{E},v::Code,::Tuple{}) = ConstCode{E}(L3e, v, ())
 ConstCode{E}(::Type{E},v::Code,env::Tuple{Vararg{E}}) = ConstCode{E}(L3e, v, env)
 top{E}(::Type{ConstCode{E}}) = ConstCode{E}(top(L3))
 bot{E}(::Type{ConstCode{E}}) = ConstCode{E}(bot(L3))
-eval_lit{E}(::Type{ConstCode{E}}, v) = top(ConstCode{E})
+eval_lit{E}(::Type{ConstCode{E}}, v::ANY) = top(ConstCode{E})
 
 # ========== Sign
 immutable Sign <: Lattice
@@ -184,11 +184,32 @@ eval_lit(::Type{Birth}, v::ANY) = top(Birth)
 
 
 # ========== Reduced product
-# (very inefficient, needs staged)
+# one day we may switch back to the non-staged version if the compiler gets smart enough
 immutable Prod{Ls} <: Lattice
     values :: Ls
 end
-prod{Ls}(values::Ls) = Prod(ntuple(i -> reduce(meet, map(v -> meet_ext(values[i], v), values)), length(values)))
+
+# this should in theory be iterated until fp for maximum precision ...
+#prod{Ls}(values::Ls) = Prod(ntuple(i -> reduce(meet, map(v -> meet_ext(values[i], v), values)), length(values)))
+@generated function prod{Ls}(values::Ls)
+    n = length(Ls.types)
+    body = []
+    names = [gensym() for i = 1:n]
+    for i = 1:n
+        push!(body, :($(names[i]) = values[$i]))
+    end
+    for i = 1:n
+        ni = names[i]
+        for j = 1:n
+            i != j || continue
+            push!(body, :($ni = meet_ext($ni, $(names[j]))))
+        end
+    end
+    quote
+        $(body...)
+        Prod(tuple($(names...)))
+    end
+end
 #top{Ls}(::Type{Prod{Ls}}) = Prod(map(T->top(T),Ls))
 #bot{Ls}(::Type{Prod{Ls}}) = Prod(map(T->bot(T),Ls))
 @generated function top{Ls}(::Type{Prod{Ls}})
@@ -211,8 +232,15 @@ function Base.show(io::IO, x::Prod)
     print(io, ")")
 end
 
-function <={Ls}(x::Prod{Ls}, y::Prod{Ls})
+#=function <={Ls}(x::Prod{Ls}, y::Prod{Ls})
     all(map(<=, x.values, y.values))
+end=#
+@generated function <={Ls}(x::Prod{Ls}, y::Prod{Ls})
+    ex = :(true)
+    for i = 1:length(Ls.types)
+        ex = :($ex && (x.values[$i] <= y.values[$i]))
+    end
+    ex
 end
 
 
@@ -236,7 +264,12 @@ end=#
     idx = findfirst(Ls.types,L)
     :(x.values[$idx])
 end
-eval_lit{Ls}(::Type{Prod{Ls}}, v) = Prod(tuple(map(T->eval_lit(T, v), Ls.types)...))
+#eval_lit{Ls}(::Type{Prod{Ls}}, v) = Prod(tuple(map(T->eval_lit(T, v), Ls.types)...))
+@generated function eval_lit{Ls}(::Type{Prod{Ls}}, v::ANY)
+    args = [:(eval_lit($L, v)) for L in Ls.types]
+    :(prod(tuple($(args...))))
+end
+
 @generated function meet{L,Ls}(x::Prod{Ls},y::L)
     L in Ls.types || error("meet " * string(x) * " : " * string(y))
     idx = findfirst(Ls.types,L)
@@ -1022,7 +1055,7 @@ function eval_assign!{V}(sched,sd,name,res::V)
     nothing
 end
 
-function eval_sym {V}(sched::Scheduler{V},t,code,e)
+function eval_sym{V}(sched::Scheduler{V},t,code,e)
     if e in code.locals || isa(e,GenSym)
         eval_local(sched.states, t.fc, t.pc, e)
     elseif isa(e,Symbol) && isconst(code.mod,e)
