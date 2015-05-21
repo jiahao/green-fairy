@@ -6,7 +6,6 @@
   - unify generic & anonymous call path (and support capt. vars in generic code)
 
 - find a common interface for mutable state (Final,Thread,...)
-- better "visited" (keyed state, what about non increasing state i.e. strong update)
 
 - make the canonicalized ccall homogenous
 - figure out what to do with :& arguments
@@ -18,7 +17,6 @@
   - mark may_throw intrinsics correctly
   - mark method error thrown correctly
 
-- better representation of the Expr tree (wait for the bytecode ?)
 - think about on-the-fly code mutation (inlining, actual constprop, ...)
   - would be super cool : figure out that a pc has converged before all its succ (reverse preorder), compute inlining cost model, inline, continue without invalidating any inference data
 
@@ -143,6 +141,8 @@ function widen(t::ANY) #TODO better this
         Union(map(widen, t.types)...)
     elseif t <: Tuple
         Base.limit_tuple_type(t)
+    elseif isa(t,DataType) && t.name === Type.name
+        Type
     else
         t
     end
@@ -956,7 +956,7 @@ function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Ty}, f::V, args::V...
         return convert(V,reduce(join, args[2:end]))
     end
     if f <= Const(Base.typeof)
-        isleaftype(argtypes[1].ty) || return Ty(Type)
+        isleaftype(argtypes[1].ty) || return Ty(DataType)
         return convert(V,Const(argtypes[1].ty))
     end
     if f <= Const(Base.tuple)
