@@ -61,9 +61,10 @@ end
 import Base.convert
 # ========== Lattice stuff
 abstract Lattice
-istop{L<:Lattice}(x::L) = x == top(L)
-isbot{L<:Lattice}(x::L) = x == bot(L)
-
+istop{L<:Lattice}(x::L) = x === top(L)
+isbot{L<:Lattice}(x::L) = x === bot(L)
+<=(::Lattice,::Lattice) = error("<= must be defined")
+==(x::Lattice,y::Lattice) = x<=y && y<=x
 # the one and only 3-element complete lattice
 immutable L3 <: Lattice
     v :: Int8
@@ -79,10 +80,10 @@ istop(x::TagLattice) = istop(x.tag)
 isbot(x::TagLattice) = isbot(x.tag)
 Base.show(io::IO, x::TagLattice) = (istop(x) | isbot(x)) ? show(io, x.tag) : (print(io, "const(");show_limit(io,x.v);print(io,")"))
 <=(x::TagLattice,y::TagLattice) = (istop(y) || isbot(x) || x.tag == y.tag == L3e && y.v===x.v)
-function join(x::TagLattice,y::TagLattice)
+function join{T<:TagLattice}(x::T,y::T)
     x <= y && return y
     y <= x && return x
-    top(Const)
+    top(T)
 end
 
 # ========== Const
@@ -95,6 +96,7 @@ Const(v::ANY) = Const(L3e, v)
 top(::Type{Const}) = Const(top(L3), ())
 bot(::Type{Const}) = Const(bot(L3), ())
 eval_lit(::Type{Const}, v::ANY) = Const(v)
+==(x::Const,y::Const) = x.tag == y.tag && (x.tag != L3e || x.v === y.v)
 
 immutable ConstCode{EnvT} <: TagLattice
     tag :: L3
@@ -109,6 +111,7 @@ ConstCode{E}(::Type{E},v::Code,env::Tuple{Vararg{E}}) = ConstCode{E}(L3e, v, env
 top{E}(::Type{ConstCode{E}}) = ConstCode{E}(top(L3))
 bot{E}(::Type{ConstCode{E}}) = ConstCode{E}(bot(L3))
 eval_lit{E}(::Type{ConstCode{E}}, v::ANY) = top(ConstCode{E})
+==(x::ConstCode,y::ConstCode) = x.tag == y.tag && (x.tag != L3e || x.v === y.v)
 
 # ========== Sign
 immutable Sign <: Lattice
@@ -122,6 +125,7 @@ istop(x::Sign) = istop(x.tag)
 isbot(x::Sign) = isbot(x.tag)
 Base.show(io::IO, x::Sign) = (istop(x) | isbot(x)) ? show(io, x.tag) : print(io, "sign(", x.s > 0 ? "+" : x.s < 0 ? "-" : "0", ")")
 <=(x::Sign,y::Sign) = istop(y) || isbot(x) || x.tag == y.tag == L3e && x.s == y.s
+==(x::Sign,y::Sign) = x.tag == y.tag && (x.tag != L3e || x.s == y.s)
 function join(x::Sign,y::Sign)
     x <= y && return y
     y <= x && return x
@@ -156,6 +160,7 @@ function Base.show(io::IO, x::Ty)
     print(io, "ty(", x.ty, ")")
 end
 <=(x::Ty,y::Ty) = x.ty <: y.ty
+==(x::Ty,y::Ty) = Base.typeseq(x.ty,y.ty)
 join(x::Ty,y::Ty) = Ty(Base.tmerge(x.ty,y.ty))
 meet(x::Ty,y::Ty) = Ty(typeintersect(x.ty,y.ty))
 eval_lit(::Type{Ty}, v::ANY) = Ty(typeof(v))
@@ -218,8 +223,12 @@ end
 @generated function bot{Ls}(::Type{Prod{Ls}})
     :(Prod(tuple($([:(bot($T)) for T in Ls.types]...))))
 end
-istop(x::Prod) = all(istop, x.values)
-isbot(x::Prod) = any(isbot, x.values)
+#istop(x::Prod) = all(istop, x.values)
+#isbot(x::Prod) = any(isbot, x.values)
+@generated isbot{Ls}(x::Prod{Ls}) = foldl((x,i) -> :($x || isbot(x.values[$i])), :(false), 1:length(Ls.types))
+@generated istop{Ls}(x::Prod{Ls}) = foldl((x,i) -> :($x && istop(x.values[$i])), :(true), 1:length(Ls.types))
+
+
 function Base.show(io::IO, x::Prod)
     istop(x) && return print(io, "top")
     isbot(x) && return print(io, "bot")
@@ -242,6 +251,13 @@ end=#
     end
     ex
 end
+@generated function =={Ls}(x::Prod{Ls}, y::Prod{Ls})
+    ex = :(true)
+    for i = 1:length(Ls.types)
+        ex = :($ex && (x.values[$i] == y.values[$i]))
+    end
+    :(isbot(x) && isbot(y) || $ex)
+end
 
 
 #=function join{Ls}(x::Prod{Ls}, y::Prod{Ls})
@@ -252,7 +268,7 @@ end=#
     :(Prod(tuple($(args...))))
 end
 
-function <={L,Ls}(x::Prod{Ls},y::L)
+function <={L<:Lattice,Ls}(x::Prod{Ls},y::L)
     convert(L,x) <= y
 end
 #=function convert{L,Ls}(::Type{L},x::Prod{Ls})
@@ -367,32 +383,98 @@ function join!(s::ExprState, fc::Int, pc::Int, args...)
     chg
 end
 
+function Base.countnz(B::BitArray, upto)
+    n = 0
+    Bc = B.chunks
+    d,r = divrem(upto, 64)
+    @inbounds for i = 1:d
+        n += count_ones(Bc[i])
+    end
+    if r > 0
+        msk = ~zero(UInt64) >> (64-r)
+        @inbounds n += count_ones(Bc[d+1] & msk)
+    end
+    n
+end
+
 # naive impl
 type StateCell{T}
-    val :: Vector{T}
+    #val :: Vector{T}
+    val_isset :: BitVector
+    val_rle :: Vector{T}
 end
-StateCell{T}(::Type{T},n::Int) = StateCell(T[bot(T) for i in 1:n+1])
-Base.getindex(s::StateCell, pc) = s.val[pc]
+
+StateCell{T}(::Type{T},n::Int) = StateCell(#=T[bot(T) for i=1:n+1],=#fill!(BitVector(n+1),false),Array(T,0))
+function Base.getindex{T}(s::StateCell{T}, pc)
+    #v1 = s.val[pc]
+    idx = countnz(s.val_isset, pc)
+    v2 = if idx == 0
+        bot(T)
+    else
+        #@show s.val_rle s.val_isset idx
+        s.val_rle[idx]
+    end
+    #=if v1 != v2
+        @show (v1,v2,pc)
+        @show s.val_rle s.val s.val_isset
+        error()
+    end=#
+    v2
+end
+function Base.setindex!{T}(s::StateCell{T},v::T,pc::Int)
+    #println("SET ",pc, " ", v)
+    #s.val[pc] = v
+    isset = s.val_isset[pc]
+    idx = countnz(s.val_isset, pc)
+    #@show s.val_rle s.val s.val_isset pc idx
+    if isset # could collapse here
+        if pc < length(s.val_isset) && !s.val_isset[pc+1]
+            insert!(s.val_rle, idx+1, idx > 0 ? s.val_rle[idx] : bot(T))
+            s.val_isset[pc+1] = true
+        end
+        if idx == 1 && isbot(v) || idx > 1 && s.val_rle[idx-1] == v
+            deleteat!(s.val_rle, idx)
+            s.val_isset[pc] = false
+        else
+            s.val_rle[idx] = v
+        end
+    elseif idx == 0 && !isbot(v) || idx > 0 && s.val_rle[idx] != v
+        s.val_isset[pc] = true
+        insert!(s.val_rle, idx+1, v)
+        if pc < length(s.val_isset) && !s.val_isset[pc+1]
+            insert!(s.val_rle, idx+2, idx > 0 ? s.val_rle[idx] : bot(T))
+            s.val_isset[pc+1] = true
+        end
+    end
+    #println("RES ", 1 .* s.val_isset, " ", s.val_rle)
+    s
+end
 function propagate!{T}(s::StateCell{T},pc::Int,next::Int)
     pc > 0 || return false
-    if s.val[pc] <= s.val[next]
+    next != pc+1 || s.val_isset[next] || return false
+    s_pc = s[pc]
+    s_next = s[next]
+    if s_pc <= s_next
         false
     else
-        s.val[next] = join(s.val[next],s.val[pc])
+        val = isbot(s_next) ? s_pc : join(s_next,s_pc)
+        s[next] = val
         true
     end
 end
 function propagate!{T}(s::StateCell{T},pc::Int,next::Int,d::T)
-    if d <= s.val[next]
+    if d <= s[next]
         false
     else
-        s.val[next] = join(s.val[next],d)
+        s[next] = join(s[next],d)
         true
     end
 end
 function same_state{T}(s::StateCell{T},pc::Int,d::T)
-    d <= s.val[pc] && s.val[pc] <= d # TODO ugh
+    d == s[pc]
 end
+
+
 type LocalStore{V}
     locals :: Dict{LocalName,StateCell{V}}
     len :: Int
@@ -426,10 +508,10 @@ function eval_local{V}(s::LocalStore{V}, pc::Int, name::LocalName)
     if !haskey(s.locals, name)
         bot(V)
     else
-        s.locals[name].val[pc]
+        s.locals[name][pc]
     end
 end
-function same_state{V}(s::LocalStore{V}, pc::Int, d)
+function same_state{V}(s::LocalStore{V}, pc::Int, d::Vector{LocalStateDiff{V}})
     for lsd in d
         if !haskey(s.locals, lsd.name)
             return false
@@ -1514,47 +1596,8 @@ function Base.show(io::IO, s::FinalState)
     print(io, ")")
 end
 
-type ThreadState{Loc} <: Lattice
-    locals :: Loc
-end
-function Base.show(io::IO, s::ThreadState)
-    print(io, "locals : ")
-    show(io, s.locals)
-end
-top{L}(::Type{ThreadState{L}}) = ThreadState(top(L))
-bot{L}(::Type{ThreadState{L}}) = ThreadState(bot(L))
-eval_local(s::ThreadState, pc::Int, name::LocalName) = eval_local(s.locals, pc, name)
-<=(s::ThreadState,s2::ThreadState) = s.locals <= s2.locals
-function call_gate!(s::ThreadState)
-    empty!(s.locals.map)
-    s
-end
 
-function join!(s::ThreadState, fld::Symbol, v)
-    if fld == :locals
-        s.locals, chg = join!(s.locals, v)
-    else
-        error(@sprintf("??? %s", fld))
-    end
-    s, chg
-end
-
-function join!{V}(s::ThreadState{V}, s2::ThreadState{V})
-    s.locals, chg = join!(s.locals, s2.locals)
-    #=l1,l2 = length(s.eh_stack), length(s2.eh_stack)
-    n = max(l1,l2)
-    for i = 1:n
-        if i > l1 || i > l2 || s.eh_stack[i] != s2.eh_stack[i]
-            chg |= (i > l1 || s.eh_stack[i] != (0,0))
-            resize!(s.eh_stack, i)
-            s.eh_stack[i] = (0,0)
-            break
-        end
-    end=#
-    s, chg
-end
-
-export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ThreadState,ConstCode,LocalStore,State
+export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ConstCode,LocalStore,State
 
 # == client
 
@@ -1587,7 +1630,7 @@ function RUN(F::Function,args::ANY)
     println("Finished in ", niter, " ", maxthr, " threads :")
     @printf("Speed %.2f Kit/s for %.2f s\n", (niter/1000)/dt, dt)
     println("Result : ", sched.final[1])
-    read(STDIN,Char)
+    #read(STDIN,Char)
     sched
 end
 DOIT() = GreenFairy.RUN(DOIT, ())
@@ -1628,11 +1671,11 @@ function K()
     y = G(x+1)
     return y=#
     x = 3
-    x = G(x)
+    x = 22
     x
 end
 #K() = Base.typeinf(UNKNOWN,UNKNOWN,UNKNOWN)
-GreenFairy.RUN(K,())
+#GreenFairy.RUN(GreenFairy.DOIT,())
 
 FA(n) = n > 0 ? FA(n-1) : UNKNOWN ? throw(n) : n
 FB(n) = throw(n)
