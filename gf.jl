@@ -140,9 +140,11 @@ function widen(t::ANY) #TODO better this
     if isa(t,UnionType)
         Union(map(widen, t.types)...)
     elseif t <: Tuple
-        Base.limit_tuple_type(t)
+        Core.Inference.limit_tuple_type(t)
     elseif isa(t,DataType) && t.name === Type.name
         Type
+    elseif isa(t,TypeVar)
+        t.ub
     else
         t
     end
@@ -161,7 +163,7 @@ function Base.show(io::IO, x::Ty)
 end
 <=(x::Ty,y::Ty) = x.ty <: y.ty
 ==(x::Ty,y::Ty) = Base.typeseq(x.ty,y.ty)
-join(x::Ty,y::Ty) = Ty(Base.tmerge(x.ty,y.ty))
+join(x::Ty,y::Ty) = Ty(Core.Inference.tmerge(x.ty,y.ty))
 meet(x::Ty,y::Ty) = Ty(typeintersect(x.ty,y.ty))
 eval_lit(::Type{Ty}, v::ANY) = Ty(typeof(v))
 
@@ -637,6 +639,13 @@ end
 meet_ext(v::Lattice, v2::Lattice) = v
 meet_ext{T}(v::T,v2::T) = v
 meet_ext(v::Ty, v2::Const) = istop(v2) ? v : eval_lit(Ty,v2.v)
+function meet_ext(v::Const,v2::Ty)
+    if isdefined(v2.ty, :instance)
+        Const(v2.ty.instance)
+    else
+        v
+    end
+end
 
 # canonicalize those to function calls
 # there are some special ast node and ccall in there
@@ -661,7 +670,7 @@ call_gate(v::Union(Sign,Ty,Birth)) = v
 call_gate(v::ConstCode) = v
 call_gate(p::Prod) = prod(map(call_gate,p.values))
 NOMETH = 0
-function eval_call_gf!{V,S,F}(sched::Scheduler{V,S,F}, t::Thread, fv, args)
+function eval_call_gf!{V,S,F}(sched::Scheduler{V,S,F}, t::Thread, fv::Function, args::Tuple{Vararg{V}})
     argt = map(args) do a
         ca = convert(Const,a)
         if !istop(ca) && isa(ca.v, Type)
@@ -684,8 +693,6 @@ function eval_call_gf!{V,S,F}(sched::Scheduler{V,S,F}, t::Thread, fv, args)
 end
 function eval_call_code!{V,S,F}(sched::Scheduler{V,S,F},t::Thread,fcode,args,env)
     child = Thread(0,1)
-#    child.state, _ = join!(child.state, state)
-#    child.state = call_gate!(child.state)
     args = map(call_gate, args)
     if any(istop, args)
         #                println("Calling gf ", fv, " ", argt, " with args ", args)
@@ -709,10 +716,11 @@ function eval_call_code!{V,S,F}(sched::Scheduler{V,S,F},t::Thread,fcode,args,env
         arg = args[i]
         if haskey(fcode.decl_types, argname)
             declty = fcode.decl_types[argname]
-            if isa(declty,Type) # TODO handle typevars here (and everywhere ?)
-                # also should convert Type{A} to meet(Const(A),DataType)
-                newarg = meet(arg, convert(V,Ty(declty)))
-                arg = newarg
+            if isa(declty,DataType) && declty.name === Type.name &&
+                isa(declty.parameters[1],Type)
+                arg = meet(arg, convert(V,Const(declty.parameters[1])))
+            else
+                arg = meet(arg, convert(V,Ty(declty)))
             end
         end
         eval_assign!(sched, sd, argname, arg)
@@ -901,11 +909,8 @@ function intrinsic_name(cv)
     intrname
 end
 
-# TODO make this correct (float types etc), add exception info
+# TODO add exception info
 const INTR_TYPES = [
-                    #(Int, [Base.add_int, Base.sub_int,Base.check_top_bit, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.ashr_int, Base.checked_ssub, Base.checked_sadd, Base.and_int, Base.flipsign_int, Base.shl_int, Base.lshr_int, Base.xor_int, Base.and_int, Base.neg_int, Base.or_int, Base.sdiv_int, Base.cttz_int, Core.sizeof, Base.rint_llvm]),
-                    #(UInt, [Base.udiv_int, Base.urem_int]),
-                    #(Float64, [Base.add_float, Base.div_float, Base.mul_float, Base.ceil_llvm, Base.sub_float, Base.neg_float, Base.abs_float, Base.sqrt_llvm]),
                     (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float, Base.issubtype, Base.isa, Base.isdefined, Base.fpiseq, Base.fpislt]),
                     #(Bool, [Base.isa, Base.isdefined, Base.is, Base.issubtype]),
                     (DataType, [Base.fieldtype, Base.apply_type]),
@@ -1413,10 +1418,8 @@ function linearize_stmt!(stmt,body,args_pc)
     elseif isa(stmt,Expr) && stmt.head === :copyast
         push!(body,stmt.args[1])
         push!(args_pc,())
-    elseif isa(stmt,Expr) && stmt.head === :static_typeof
-        linearize_stmt!(Expr(:call, TopNode(:typeof), stmt.args[1]), body, args_pc)
-    elseif isa(stmt,Expr) && stmt.head === :type_goto
-        warn("type_goto is not supported (and never will ?)")
+    elseif isa(stmt,Expr) && stmt.head in (:type_goto, :static_typeof)
+        error("type_goto/static_typeof are not supported (and never will ?)")
     elseif isa(stmt,Expr) && stmt.head === :the_exception
         push!(body, :the_exception) # TODO name collision, make this a proper part of state
         push!(args_pc,())
@@ -1596,9 +1599,6 @@ function join!{V}(s::FinalState{V}, fld::Symbol, v)
         s.ret_val, chg = join!(s.ret_val, v)
     elseif fld == :thrown
         s.thrown, chg = join!(s.thrown, convert(Ty,v))
-    elseif fld == :must_throw
-        error("!!")
-        s.must_throw, chg = v,(s.must_throw!=v)#join!(s.must_throw, convert(Const,v)) #TODO STRONG UPDATE THIS IS WRONG
     else
         error("..??")
     end
