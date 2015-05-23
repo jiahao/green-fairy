@@ -912,7 +912,7 @@ end
 # TODO add exception info
 const INTR_TYPES = [
                     (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float, Base.issubtype, Base.isa, Base.isdefined, Base.fpiseq, Base.fpislt]),
-                    #(Bool, [Base.isa, Base.isdefined, Base.is, Base.issubtype]),
+                    (Int,[Core.sizeof]),
                     (DataType, [Base.fieldtype, Base.apply_type]),
                     (UnionType, [Base.Union]),
                     (SimpleVector, [Base.svec]),
@@ -1418,6 +1418,8 @@ function linearize_stmt!(stmt,body,args_pc)
     elseif isa(stmt,Expr) && stmt.head === :copyast
         push!(body,stmt.args[1])
         push!(args_pc,())
+    elseif isa(stmt,Expr) && stmt.head === :& # TODO this is not correct
+        linearize_stmt!(stmt.args[1], body, args_pc)
     elseif isa(stmt,Expr) && stmt.head in (:type_goto, :static_typeof)
         error("type_goto/static_typeof are not supported (and never will ?)")
     elseif isa(stmt,Expr) && stmt.head === :the_exception
