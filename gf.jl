@@ -251,7 +251,7 @@ end=#
     for i = 1:length(Ls.types)
         ex = :($ex && (x.values[$i] <= y.values[$i]))
     end
-    ex
+    :(isbot(x) || $ex)
 end
 @generated function =={Ls}(x::Prod{Ls}, y::Prod{Ls})
     ex = :(true)
@@ -423,31 +423,73 @@ function Base.getindex{T}(s::StateCell{T}, pc)
     end=#
     v2
 end
+NR = 0
+export NR
+# ASSUMES NON TRIVIAL INSERT
 function Base.setindex!{T}(s::StateCell{T},v::T,pc::Int)
     #println("SET ",pc, " ", v)
     #s.val[pc] = v
-    isset = s.val_isset[pc]
-    idx = countnz(s.val_isset, pc)
+    isset = s.val_isset
+    val = s.val_rle
+    self_isset = s.val_isset[pc]
+    idx = countnz(isset, pc)
     #@show s.val_rle s.val s.val_isset pc idx
-    if isset # could collapse here
-        if pc < length(s.val_isset) && !s.val_isset[pc+1]
-            insert!(s.val_rle, idx+1, idx > 0 ? s.val_rle[idx] : bot(T))
-            s.val_isset[pc+1] = true
+    not_last = pc < length(isset)
+    @inbounds if self_isset # already set
+        if idx == 1 && isbot(v) || idx > 1 && val[idx-1] == v # collapse into prev
+            if not_last && !isset[pc+1] # reuse current for next
+                isset[pc+1] = true
+            else
+                if not_last && isset[pc+1] && val[idx+1] == v # collapse current & next into prev
+                    isset[pc+1] = false
+                    deleteat!(val, idx+1)
+                end
+                deleteat!(val, idx)
+            end
+            isset[pc] = false
+        elseif not_last && !isset[pc+1] # preserve next
+            insert!(val, idx+1, idx > 0 ? val[idx] : bot(T))
+            val[idx] = v
+            isset[pc+1] = true
+        elseif not_last && val[idx+1] == v
+            deleteat!(val, idx)
+            isset[pc+1] = false
+        else # update in place
+            val[idx] = v
         end
-        if idx == 1 && isbot(v) || idx > 1 && s.val_rle[idx-1] == v
-            deleteat!(s.val_rle, idx)
-            s.val_isset[pc] = false
+    elseif idx == 0 && !isbot(v) || idx > 0 && val[idx] != v # need to set
+        isset[pc] = true
+        if not_last && isset[pc+1] && val[idx+1] == v # reuse next for current
+            isset[pc+1] = false
         else
-            s.val_rle[idx] = v
-        end
-    elseif idx == 0 && !isbot(v) || idx > 0 && s.val_rle[idx] != v
-        s.val_isset[pc] = true
-        insert!(s.val_rle, idx+1, v)
-        if pc < length(s.val_isset) && !s.val_isset[pc+1]
-            insert!(s.val_rle, idx+2, idx > 0 ? s.val_rle[idx] : bot(T))
-            s.val_isset[pc+1] = true
+            insert!(val, idx+1, v)
+            if not_last && !isset[pc+1] # preserve next
+                insert!(val, idx+2, idx > 0 ? val[idx] : bot(T))
+                isset[pc+1] = true
+            end
         end
     end
+    #@assert !(1<=idx<=(length(s.val_rle)-1)) || s.val_rle[idx] != s.val_rle[idx+1]
+    # if not already set :
+    # can collapse into { prev set => don't set, next pc => swap bits }
+    # if prev_val == val: done
+    # else {
+    #   if next_pc set { if next_pc val == val: swap bits, done
+    #                    else: set self bit, insert self val, done }
+    #   else { set self & next, insert both }
+    # }
+    # if already set :
+    # can collapse into { both => unset self & next pc, delete 2 val;
+    # if prev_val == val {
+    #   if next_pc set { if next_pc val == val: unset self & next; remove both
+    #                    else: unset self, remove self }
+    #   else { swap bits; done }
+    # }
+    # else {
+    #   if next_pc set { if next_pc val == val: unset next, remove next; done
+    #                    else: update self inplace; done }
+    #   else { set next; insert val; }
+    # }
     #println("RES ", 1 .* s.val_isset, " ", s.val_rle)
     s
 end
@@ -460,16 +502,26 @@ function propagate!{T}(s::StateCell{T},pc::Int,next::Int)
         false
     else
         val = isbot(s_next) ? s_pc : join(s_next,s_pc)
-        s[next] = val
-        true
+        if !(val <= s_next)
+            s[next] = val
+            true
+        else
+            false
+        end
     end
 end
 function propagate!{T}(s::StateCell{T},pc::Int,next::Int,d::T)
-    if d <= s[next]
+    s_next = s[next]
+    if d <= s_next
         false
     else
-        s[next] = join(s[next],d)
-        true
+        val = isbot(s_next) ? d : join(s_next,d)
+        if !(val <= s_next)
+            s[next] = val
+            true
+        else
+            false
+        end
     end
 end
 function same_state{T}(s::StateCell{T},pc::Int,d::T)
@@ -533,15 +585,43 @@ function same_state{V}(s::LocalStore{V}, pc::Int, d::Vector{LocalStateDiff{V}})
     end
     true
 end
-immutable State{LV}
-    funs :: Vector{LocalStore{LV}}
+immutable State{LV,FinalT}
+    funs :: Vector{LocalStore{LV}} # TODO better name
+    finals :: Vector{FinalT}
 end
-State{V}(::Type{V}) = State(Array(LocalStore{V}, 0))
-function ensure_filled!{V}(s::State{V}, fc::Int, code::Code)
+State{V,FinalT}(::Type{V},::Type{FinalT}) = State(Array(LocalStore{V}, 0), Array(FinalT,0))
+function ensure_filled!{V,F}(s::State{V,F}, fc::Int, code::Code)
     push!(s.funs, LocalStore(V, length(code.body)))
+    push!(s.finals, bot(F))
 end
 eval_local(s::State, fc::Int, pc::Int, name::LocalName) = eval_local(s.funs[fc], pc, name)
-propagate!(s::State,fc::Int,pc::Int,next::Int,sd) = propagate!(s.funs[fc],pc,next,sd)
+function propagate!(s::State,fc::Int,pc::Int,next::Int,sd)
+    if next == s.funs[fc].len+1
+        propagate!(s,s.finals[fc],fc,pc,sd)
+    end
+    propagate!(s.funs[fc],pc,next,sd.locals)
+end
+
+type FinalState{V} <: Lattice
+    ret_val :: V
+    thrown :: Ty
+    must_throw :: Bool
+end
+bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),bot(Ty),false)
+function Base.show(io::IO, s::FinalState)
+    print(io, "(returned: ", s.ret_val)
+    if !isbot(s.thrown)
+        print(io, ", ", s.must_throw ? "must" : "may", " throw ", s.thrown)
+    end
+    print(io, ")")
+end
+
+function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
+    fs.ret_val = join(fs.ret_val, sd.value)
+    fs.thrown = join(fs.thrown, sd.thrown)
+    fs.must_throw &= sd.must_throw
+    false # ?
+end
 function same_state(s::State, fc::Int, pc::Int, sd)
     same_state(s.funs[fc], pc, sd)
 end
@@ -559,10 +639,9 @@ type Thread
 end
 Thread(f,p) = Thread(f,p,0,0,Array(Int,0))
 
-type Scheduler{ValueT,StateT,FinalT}
+type Scheduler{ValueT,StateT}
     values :: ExprState{ValueT}
     states :: StateT
-    final :: FunState{FinalT}
     done :: Vector{Bool}
     threads :: Vector{Thread}
     done_threads :: Vector{Thread}
@@ -572,27 +651,17 @@ type Scheduler{ValueT,StateT,FinalT}
 end
 
 function register_fun!(sched::Scheduler, fcode::Code)
-    fc = 0
-#=    for i = 1:length(sched.funs)
-        if sched.funs[i] == fcode
-            fc = i
-        end
-    end=#
-    if fc == 0
-        push!(sched.funs, fcode)
-        fc = length(sched.funs)
-        ensure_filled!(sched.values, fc, fcode)
-        ensure_filled!(sched.final, fc, fcode)
-        ensure_filled!(sched.states, fc, fcode)
-        push!(sched.done, false)
-        push!(sched.called_by, Set{Any}())
-    end
+    push!(sched.funs, fcode)
+    fc = length(sched.funs)
+    ensure_filled!(sched.values, fc, fcode)
+    ensure_filled!(sched.states, fc, fcode)
+    push!(sched.done, false)
+    push!(sched.called_by, Set{Any}())
     fc
 end
 
 function Base.show(io::IO,t::Thread)
     println(io, "abstract thread ", pointer_from_objref(t), " at ",t.fc,":",t.pc, " final:")
-    #println(io, t.state)
 end
 fork(s,t) = fork(s,t,t.pc)
 fork(s,t,pc) = fork(s,t,pc)
@@ -655,6 +724,7 @@ const new_array = :new_array_tag
 const new_array_1d = :new_array_1d_tag
 const new_array_2d = :new_array_2d_tag
 const new_array_3d = :new_array_3d_tag
+const addressof = :addressof_tag
 function isleaftype(x::ANY)
     ccall(:jl_is_leaf_type, Int32, (Any,), x)
 end
@@ -670,7 +740,7 @@ call_gate(v::Union(Sign,Ty,Birth)) = v
 call_gate(v::ConstCode) = v
 call_gate(p::Prod) = prod(map(call_gate,p.values))
 NOMETH = 0
-function eval_call_gf!{V,S,F}(sched::Scheduler{V,S,F}, t::Thread, fv::Function, args::Tuple{Vararg{V}})
+function eval_call_gf!{V,S}(sched::Scheduler{V,S}, t::Thread, fv::Function, args::Tuple{Vararg{V}})
     argt = map(args) do a
         ca = convert(Const,a)
         if !istop(ca) && isa(ca.v, Type)
@@ -685,13 +755,13 @@ function eval_call_gf!{V,S,F}(sched::Scheduler{V,S,F}, t::Thread, fv::Function, 
     elseif isa(fcode, Code)
         eval_call_code!(sched, t, fcode, args, ())
     else
-        global NOMETH
-        NOMETH += 1
+        #global NOMETH
+        #NOMETH += 1
         #println("no ", fcode, " ", fv, " ", args)
         0
     end
 end
-function eval_call_code!{V,S,F}(sched::Scheduler{V,S,F},t::Thread,fcode,args,env)
+function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args,env)
     child = Thread(0,1)
     args = map(call_gate, args)
     if any(istop, args)
@@ -709,8 +779,8 @@ function eval_call_code!{V,S,F}(sched::Scheduler{V,S,F},t::Thread,fcode,args,env
         DEBUGWARN && warn(@sprintf("Wrong arg count for %s : %s vs %s%s", fcode, fcode.args, args, fcode.isva ? " (vararg)" : ""))
         return -1 # TODO ditto
     end
-    sd = Array(LocalStateDiff{V}, 0)
-    sizehint!(sd, length(fcode.args) + div(length(fcode.tvar_mapping),2) + length(fcode.capt))
+    sd = StateDiff(V,Ty)
+    sizehint!(sd.locals, length(fcode.args) + div(length(fcode.tvar_mapping),2) + length(fcode.capt))
     for i = 1:narg
         argname = fcode.args[i]
         arg = args[i]
@@ -723,26 +793,26 @@ function eval_call_code!{V,S,F}(sched::Scheduler{V,S,F},t::Thread,fcode,args,env
                 arg = meet(arg, convert(V,Ty(declty)))
             end
         end
-        eval_assign!(sched, sd, argname, arg)
+        eval_assign!(sched, sd, fcode, argname, arg)
     end
     if fcode.isva
         tup = eval_call!(sched, child, convert(V,Const(Base.tuple)), vargs)
         @assert tup !== nothing
-        eval_assign!(sched, sd, fcode.args[end], tup)
+        eval_assign!(sched, sd, fcode, fcode.args[end], tup)
     end
     for i=1:2:length(fcode.tvar_mapping)
         tv = fcode.tvar_mapping[i]
         tval = fcode.tvar_mapping[i+1]
-        eval_assign!(sched, sd, tv.name, convert(V,Const(tval)))
+        eval_assign!(sched, sd, fcode, tv.name, convert(V,Const(tval)))
     end
     length(env) == length(fcode.capt) || DEBUGWARN && warn(@sprintf("Wrong env size %d vs %d : %s vs %s", length(env), length(fcode.capt), env, fcode.capt))
     for i=1:length(fcode.capt)
-        eval_assign!(sched, sd, fcode.capt[i], i > length(env) ? top(V) : convert(V,env[i]))
+        eval_assign!(sched, sd, fcode, fcode.capt[i], i > length(env) ? top(V) : convert(V,env[i]))
     end
     
     for fc in 1:length(sched.funs)
         if sched.funs[fc] === fcode
-            if same_state(sched.states, fc, 1, sd)
+            if same_state(sched.states, fc, 1, sd.locals)
                 return fc
             else
             end
@@ -1135,44 +1205,65 @@ function eval_call!{V,EV}(sched::Scheduler, t::Thread, ::Type{ConstCode{EV}}, f:
     top(V)
 end
 
-function eval_assign!{V}(sched,sd,name,res::V)
-    #join!(t.state, :locals, name => res)
-    push!(sd, LocalStateDiff(name, res))
-    #=if changed
-        empty!(t.visited)
-    end=#
-    nothing
+function eval_assign!{V}(sched,sd,code,name,res::V)
+    if name in code.locals || isa(e,GenSym)
+        push!(sd.locals, LocalStateDiff(name, res))
+    else
+        # TODO unknown effects
+    end
 end
 
-function eval_sym{V}(sched::Scheduler{V},t,code,e)
+function eval_sym{V}(sched::Scheduler{V},t,sd,code,e)
     if e in code.locals || isa(e,GenSym)
         eval_local(sched.states, t.fc, t.pc, e)
     elseif isa(e,Symbol) && isconst(code.mod,e)
         eval_lit(V, eval(code.mod,e))
     else
+        may_throw(sd, Ty(UndefVarError))
         top(V) # global
     end
 end
+
+type StateDiff{V,TV}
+    locals :: Vector{LocalStateDiff{V}}
+    value :: V
+    thrown :: TV
+    must_throw :: Bool
+end
+StateDiff(LV,TV) = StateDiff(Array(LocalStateDiff{LV},0), bot(LV), bot(TV), false)
+function Base.copy(sd::StateDiff)
+    StateDiff(copy(sd.locals), sd.value, sd.thrown, sd.must_throw)
+end
+
+function may_throw(sd :: StateDiff, v)
+    sd.thrown = join(sd.thrown, v)
+end
+
+function must_throw(sd :: StateDiff, v)
+    sd.thrown = join(sd.thrown, v)
+    sd.must_throw &= true
+end
+
 
 function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     TRACE = GTRACE
     code = sched.funs[t.fc]
     values = sched.values
-    sd = Array(LocalStateDiff{V}, 0)
+    sd = StateDiff(V,Ty)#Array(LocalStateDiff{V}, 0)
     
     TRACE && println("Step thread ",t.fc, ":", t.pc)
     next_pc = branch_pc = t.pc+1
     e = code.body[t.pc]
     res = if t.wait_on > 0
         if sched.done[t.wait_on]
-            final = sched.final[t.wait_on]
+            final = sched.states.finals[t.wait_on]
             t.wait_on = 0
         else # cycle
             ft = fork(sched, t)
             ft.wait_on = t.wait_on
             ft.cycle += 1
             t.wait_on = 0
-            final = sched.final[ft.wait_on]
+            final = sched.states.finals[ft.wait_on]
         end
         # TODO move into function
         #t.final, _ = join!(t.final, :thrown, final.thrown)
@@ -1189,7 +1280,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         if e === :UNKNOWN
             top(V)
         else
-            eval_sym(sched, t, code, e)
+            eval_sym(sched, t, sd, code, e)
         end
     elseif isa(e, LambdaStaticData)
         # canonicalize static AST into : new(Function, ast)
@@ -1199,7 +1290,6 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     elseif isa(e,Expr) && e.head === :return
         retval = values[t.fc,code.call_args[t.pc][1]]
         next_pc = branch_pc = length(code.body)+1
-        join!(sched.final, t.fc, :ret_val, retval)
         retval
     elseif isa(e,GotoNode)
         next_pc = branch_pc = code.label_pc[e.label::Int+1]
@@ -1216,24 +1306,12 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     elseif isa(e,Expr) && e.head === :(=)
         @assert next_pc == branch_pc
         val = values[t.fc,code.call_args[t.pc][1]]
-        eval_assign!(sched, sd, e.args[1]::LocalName, val)
+        eval_assign!(sched, sd, code, e.args[1]::LocalName, val)
         val
     elseif isa(e,Expr) && e.head == :enter
         push!(t.eh_stack, code.label_pc[e.args[1]::Int+1])
         convert(V,Const(nothing))
     elseif isa(e,Expr) && e.head == :leave
-        #=if !isbot(t.final.thrown) # could throw
-            handler_pc = t.eh_stack[end]
-            ft = fork(sched, t, handler_pc) # TODO this is not correct, we should join all state inside the handler (more fancy : remember the thrown points and join from here)
-            ft.final.thrown = bot(Ty)
-            ft.final.must_throw = false
-            eval_assign!(sched, ft, :the_exception, t.final.thrown)
-            t.final.thrown = bot(Ty)
-            if t.final.must_throw # thrown for sure
-                next_pc = branch_pc = length(code.body)+1
-            end
-            t.final.must_throw = false
-        end=#
         for i=1:(e.args[1]::Int)
             pop!(t.eh_stack)
         end
@@ -1254,13 +1332,36 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     if res === nothing # TODO find a best way to express not done
         return
     end
+    sd.value = res
+    
     TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", res))
-    values[t.fc,t.pc] = res
+    
+    could_throw = !isbot(sd.thrown)
+    must_throw = sd.must_throw
+    
+    branch_sd = sd
+    
+    if could_throw
+        @assert next_pc == branch_pc == t.pc+1 # branching cannot throw
+        exc_sd = LocalStateDiff(:the_exception, convert(V,sd.thrown))
+        handler = isempty(t.eh_stack) ? length(code.body)+1 : t.eh_stack[end]
+        branch_pc = handler
+        if must_throw
+            next_pc = handler
+            push!(sd.locals, exc_sd)
+        else
+            branch_sd = copy(sd)
+            push!(branch_sd.locals, exc_sd)
+        end
+    end
+    if !must_throw
+        values[t.fc,t.pc] = res
+    end
 
     chgd = propagate!(sched.states, t.fc, t.pc, next_pc, sd)
 
     if next_pc != branch_pc
-        branch_chgd = propagate!(sched.states, t.fc, t.pc, branch_pc, sd)
+        branch_chgd = propagate!(sched.states, t.fc, t.pc, branch_pc, branch_sd)
         if branch_chgd || values.changed
             ft = fork(sched, t, branch_pc)
         end
@@ -1332,11 +1433,11 @@ function step!(s::Scheduler)
         mincycle = isdone ? -1 : minimum([s.threads[i].cycle for i in same_func])
         #println("Thread finished at ", s.funs[fc], " : ", t.cycle, " min ", mincycle)
         if !isdone && mincycle > t.cycle
-            isdone = !has_changed(s.final, fc)
-            reset_changed(s.final, fc)
+            #isdone = !has_changed(s.final, fc)
+            #reset_changed(s.final, fc)
         end
         if isdone
-            if isbot(s.final[fc])
+            if isbot(s.states.finals[fc])
                 println(s)
                 println("Reached bot for ", s.funs[fc])
                 for b in s.funs[fc].body
@@ -1367,6 +1468,7 @@ function run(s::Scheduler)
 end
 function Base.show(io::IO, s::Scheduler)
     println(io, "====== scheduler (", length(s.threads), " active threads, ", length(s.funs), " functions):")
+    return
 #=    for t in s.threads
         println(io, "thread ", t)
     end=#
@@ -1385,7 +1487,7 @@ function Base.show(io::IO, s::Scheduler)
         for (fun, pc) in callers
             println(io, "\t- ", fun, " at ", pc)
         end
-        println(io, "final : ", s.final[k])
+        println(io, "final : ", s.states.finals[k])
         println(io, "initial : ")
         show_dict(io, s.states[k, 1])
         page_out && (k % 30 == 0) && read(STDIN, Char)
@@ -1589,38 +1691,6 @@ function displayfun(s::Scheduler, fc::Int)
     display("text/html", readall(b))
 end
 
-
-type FinalState{V} <: Lattice
-    ret_val :: V
-    thrown :: Ty
-    must_throw :: Bool
-end
-bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),bot(Ty),false)
-function join!{V}(s::FinalState{V}, fld::Symbol, v)
-    if fld == :ret_val
-        s.ret_val, chg = join!(s.ret_val, v)
-    elseif fld == :thrown
-        s.thrown, chg = join!(s.thrown, convert(Ty,v))
-    else
-        error("..??")
-    end
-    s, chg
-end
-function join!{V}(s::FinalState{V},s2::FinalState{V})
-    s.ret_val, chg = join!(s.ret_val, s2.ret_val)
-    s.thrown, chg2 = join!(s.thrown, s2.thrown)
-    s.must_throw, chg3 = (s.must_throw & s2.must_throw), (s.must_throw && !s2.must_throw)
-    s, (chg | chg2 | chg3)
-end
-function Base.show(io::IO, s::FinalState)
-    print(io, "(returned: ", s.ret_val)
-    if !isbot(s.thrown)
-        print(io, ", ", s.must_throw ? "must" : "may", " throw ", s.thrown)
-    end
-    print(io, ")")
-end
-
-
 export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ConstCode,LocalStore,State
 
 # == client
@@ -1629,7 +1699,7 @@ module Analysis
 using GreenFairy
 const ValueT = Prod{Tuple{Const,Ty,Sign,Birth,ConstCode{Ty}}}
 const FinalT = FinalState{ValueT}
-make_sched(conf) = Scheduler(ExprState(ValueT),State(ValueT),FunState(FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
+make_sched(conf) = Scheduler(ExprState(ValueT),State(ValueT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
 end
 
 function run(f::Function, args)
@@ -1640,7 +1710,7 @@ function run(f::Function, args)
     end
     println("Finished in ", niter, " ", maxthr, " threads :")
     @printf("Speed %.2f Kit/s for %.2f s\n", (niter/1000)/dt, dt)
-    println("Result : ", sched.final[1])
+    #println("Result : ", sched.final[1])
     read(STDIN,Char)
     sched
 end
@@ -1653,7 +1723,7 @@ function RUN(F::Function,args::ANY)
     end
     println("Finished in ", niter, " ", maxthr, " threads :")
     @printf("Speed %.2f Kit/s for %.2f s\n", (niter/1000)/dt, dt)
-    println("Result : ", sched.final[1])
+    #println("Result : ", sched.final[1])
     #read(STDIN,Char)
     sched
 end
