@@ -1052,8 +1052,8 @@ function eval_call!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Ty}, f
             else
                 0
             end
-            1 <= fidx || return bot(V)
-            isva || fidx <= len || return bot(V)
+            1 <= fidx || (must_throw!(sd,Ty(BoundsError)); return bot(V))
+            isva || fidx <= len || (must_throw!(sd,Ty(BoundsError)); return bot(V))
             ftyp = fidx <= len ? aty.types[fidx] : aty.types[end].parameters[1]
             return convert(V, Ty(ftyp))
         end
@@ -1120,8 +1120,9 @@ function eval_call!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Const}
             res = bot(Const)
             try
                 res = Const(rf(argvals...))
-            catch
+            catch exc
                 DEBUGWARN && warn("thrown calling ", f, " ", argvals)
+                must_throw!(sd, Ty(typeof(exc))) # TODO could be more precise here
             end
             return convert(V,res)
         end
@@ -1131,7 +1132,7 @@ function eval_call!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Const}
     if f <= Const(Base.getfield) && isa(cargs[1].v, Module)
         mod = cargs[1].v
         name = cargs[2].v
-        isa(name, Symbol) || return bot(V) # module only supports symbol indexing
+        isa(name, Symbol) || return (must_throw!(sd,Ty(TypeError)); bot(V)) # module only supports symbol indexing
         isconst(mod, name) || return top(V) # non const global
         return convert(V,Const(eval(mod,name)))
     end
@@ -1141,9 +1142,15 @@ function eval_call!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Const}
         isimmutable(cargs[1].v) || isa(cargs[1].v, Type) || return top(V)
         v = cargs[1].v
         name = cargs[2].v
-        if (isa(name,Symbol) || isa(name,Int)) && isdefined(v, name)
-            return convert(V,Const(getfield(v, name)))
+        if (isa(name,Symbol) || isa(name,Int))
+            if  isdefined(v, name)
+                return convert(V,Const(getfield(v, name)))
+            else
+                must_throw!(sd, top(Ty)) # TODO not correct
+                return bot(V)
+            end
         else
+            must_throw!(sd, Ty(TypeError))
             return bot(V)
         end
     end

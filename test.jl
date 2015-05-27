@@ -18,7 +18,21 @@ GreenFairy.test(f2) do r
     @test r.ret_val <= Const(1)
     @test isbot(r.thrown)
 end
-
+function f3(y)
+    x = 1
+    while UNKNOWN
+        x = x + y
+    end
+    x
+end
+GreenFairy.test(f3, (Ty(Int),Sign(1))) do r
+    @test r.ret_val <= Sign(1)
+    @test isbot(r.thrown)
+end
+GreenFairy.test(f3, (Ty(Int),Sign(0))) do r
+    @test r.ret_val <= Sign(1)
+    @test isbot(r.thrown)
+end
 
 VERB && println("recursion")
 function f4(x)
