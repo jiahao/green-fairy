@@ -140,7 +140,7 @@ function widen(t::ANY) #TODO better this
     if isa(t,UnionType)
         Union(map(widen, t.types)...)
     elseif t <: Tuple
-        Core.Inference.limit_tuple_type(t)
+        Core.Inference.limit_tuple_depth(Core.Inference.limit_tuple_type(t))
     elseif isa(t,DataType) && t.name === Type.name
         Type
     elseif isa(t,TypeVar)
@@ -357,10 +357,6 @@ function join!(v::Lattice,v2::Lattice)
     j = join(v,v2)
     j, !(j <= v)
 end
-#=function Base.setindex!{T}(s::FunState{T}, val, fc::Int, pc::Int, ec::Int)
-    ensure_filled!(s,fc)
-    s.data[fc] = join(s.data[fc], val)
-end=#
 
 type ExprState{T}
     data :: Vector{Vector{T}}
@@ -399,41 +395,29 @@ function Base.countnz(B::BitArray, upto)
     n
 end
 
-# naive impl
 type StateCell{T}
-    #val :: Vector{T}
     val_isset :: BitVector
     val_rle :: Vector{T}
 end
 
-StateCell{T}(::Type{T},n::Int) = StateCell(#=T[bot(T) for i=1:n+1],=#fill!(BitVector(n+1),false),Array(T,0))
+StateCell{T}(::Type{T},n::Int) = StateCell(fill!(BitVector(n+1),false),Array(T,0))
 function Base.getindex{T}(s::StateCell{T}, pc)
-    #v1 = s.val[pc]
     idx = countnz(s.val_isset, pc)
     v2 = if idx == 0
         bot(T)
     else
-        #@show s.val_rle s.val_isset idx
         s.val_rle[idx]
     end
-    #=if v1 != v2
-        @show (v1,v2,pc)
-        @show s.val_rle s.val s.val_isset
-        error()
-    end=#
     v2
 end
 NR = 0
 export NR
 # ASSUMES NON TRIVIAL INSERT
 function Base.setindex!{T}(s::StateCell{T},v::T,pc::Int)
-    #println("SET ",pc, " ", v)
-    #s.val[pc] = v
     isset = s.val_isset
     val = s.val_rle
     self_isset = s.val_isset[pc]
     idx = countnz(isset, pc)
-    #@show s.val_rle s.val s.val_isset pc idx
     not_last = pc < length(isset)
     @inbounds if self_isset # already set
         if idx == 1 && isbot(v) || idx > 1 && val[idx-1] == v # collapse into prev
@@ -469,28 +453,6 @@ function Base.setindex!{T}(s::StateCell{T},v::T,pc::Int)
             end
         end
     end
-    #@assert !(1<=idx<=(length(s.val_rle)-1)) || s.val_rle[idx] != s.val_rle[idx+1]
-    # if not already set :
-    # can collapse into { prev set => don't set, next pc => swap bits }
-    # if prev_val == val: done
-    # else {
-    #   if next_pc set { if next_pc val == val: swap bits, done
-    #                    else: set self bit, insert self val, done }
-    #   else { set self & next, insert both }
-    # }
-    # if already set :
-    # can collapse into { both => unset self & next pc, delete 2 val;
-    # if prev_val == val {
-    #   if next_pc set { if next_pc val == val: unset self & next; remove both
-    #                    else: unset self, remove self }
-    #   else { swap bits; done }
-    # }
-    # else {
-    #   if next_pc set { if next_pc val == val: unset next, remove next; done
-    #                    else: update self inplace; done }
-    #   else { set next; insert val; }
-    # }
-    #println("RES ", 1 .* s.val_isset, " ", s.val_rle)
     s
 end
 function propagate!{T}(s::StateCell{T},pc::Int,next::Int)
@@ -604,10 +566,11 @@ end
 
 type FinalState{V} <: Lattice
     ret_val :: V
-    thrown :: Ty
+    thrown :: V
     must_throw :: Bool
+    last_cycle :: Int
 end
-bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),bot(Ty),true)
+bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),bot(V),true,0)
 function Base.show(io::IO, s::FinalState)
     print(io, "(returned: ", s.ret_val)
     if !isbot(s.thrown)
@@ -617,10 +580,22 @@ function Base.show(io::IO, s::FinalState)
 end
 
 function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
-    fs.ret_val = join(fs.ret_val, sd.value)
-    fs.thrown = join(fs.thrown, sd.thrown)
-    fs.must_throw &= sd.must_throw
-    false # ?
+    chgd = false
+    if !(sd.value <= fs.ret_val)
+        fs.ret_val = join(fs.ret_val, sd.value)
+        chgd = true
+    end
+    if !(sd.thrown <= fs.thrown)
+        fs.thrown = join(fs.thrown, sd.thrown)
+        chgd = true
+    end
+    if fs.must_throw && !sd.must_throw
+        fs.must_throw &= sd.must_throw
+        chgd = true
+    end
+    if chgd
+        fs.last_cycle = sd.t.cycle+1
+    end
 end
 function same_state(s::State, fc::Int, pc::Int, sd)
     same_state(s.funs[fc], pc, sd)
@@ -628,14 +603,6 @@ end
 function Base.getindex(s::State, fc::Int, pc::Int)
     s.funs[fc][pc]
 end
-
-type StateDiff{V,TV}
-    locals :: Vector{LocalStateDiff{V}}
-    value :: V
-    thrown :: TV
-    must_throw :: Bool
-end
-
 
 type Thread
     fc :: Int
@@ -645,6 +612,14 @@ type Thread
     eh_stack :: Vector{Int} # pc of handler
 end
 Thread(f,p) = Thread(f,p,0,0,Array(Int,0))
+
+type StateDiff{V,TV}
+    t::Thread
+    locals :: Vector{LocalStateDiff{V}}
+    value :: V
+    thrown :: TV
+    must_throw :: Bool
+end
 
 type Scheduler{ValueT,StateT}
     values :: ExprState{ValueT}
@@ -739,7 +714,7 @@ end
 
 
 
-eval_call!{L<:Lattice}(sched::Scheduler, t::Thread, ::Type{L}, f, args) = top(L)
+eval_call!{L<:Lattice}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{L}, f, args) = top(L)
 
 call_gate{T<:Lattice}(v::T) = top(T)
 call_gate(v::Const) = isa(v.v, Type)? v : top(Const) # keep constant types for metaprogramming
@@ -786,7 +761,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args,env)
         DEBUGWARN && warn(@sprintf("Wrong arg count for %s : %s vs %s%s", fcode, fcode.args, args, fcode.isva ? " (vararg)" : ""))
         return -1 # TODO ditto
     end
-    sd = StateDiff(V,Ty)
+    sd = StateDiff(child,V,Ty)
     sizehint!(sd.locals, length(fcode.args) + div(length(fcode.tvar_mapping),2) + length(fcode.capt))
     for i = 1:narg
         argname = fcode.args[i]
@@ -803,7 +778,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args,env)
         eval_assign!(sched, sd, fcode, argname, arg)
     end
     if fcode.isva
-        tup = eval_call!(sched, child, convert(V,Const(Base.tuple)), vargs)
+        tup = eval_call!(sched, child, sd, convert(V,Const(Base.tuple)), vargs)
         @assert tup !== nothing
         eval_assign!(sched, sd, fcode, fcode.args[end], tup)
     end
@@ -845,10 +820,10 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
         end
         for i=3:length(args)
             if args[i] <= Ty(Tuple)
-                l = convert(Const, eval_call!(sched, t, V, convert(V,Const(Base.nfields)), (args[i],)))
+                l = convert(Const, eval_call!(sched, t, sd, V, convert(V,Const(Base.nfields)), (args[i],)))
                 istop(l) && return top(V)
                 for k=1:l.v
-                    push!(actual_args, eval_call!(sched, t, V, convert(V,Const(Base.getfield)), (args[i], convert(V,Const(k)))))
+                    push!(actual_args, eval_call!(sched, t, sd, V, convert(V,Const(Base.getfield)), (args[i], convert(V,Const(k)))))
                 end
             else # TODO handle other iterators
                 # TODO also even when not known iterable replace (a0, ..., an, unknown, b0,...) with (a0, ..., an, vararg{join(...)}) : sometimes the method match is simple
@@ -870,7 +845,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
             push!(sched.called_by[fc], (t.fc,t.pc))
             nothing
         elseif fc == -1
-            must_throw(sd, Ty(MethodError))
+            must_throw!(sd, Ty(MethodError))
             bot(V)
         else
             top(V)
@@ -879,6 +854,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
     elseif f <= Const(Base.throw) || f <= Const(Base.rethrow)
         #join!(t.final, :thrown, args[1])
         #t.final.must_throw = true
+        must_throw!(sd, args[1])
         bot(V)
     else
         ccode = convert(ConstCode{Ty}, fun)
@@ -912,7 +888,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
                 fun = convert(V,Const(OtherBuiltins.new))
                 args = tuple(convert(V,Const(Base.Expr)), args...)
             end
-            result = eval_call!(sched, t, V, fun, args)
+            result = eval_call!(sched, t, sd, V, fun, args)
             #=if !istop(convert(Const, fun)) && istop(result) && !any(istop, args)
                 warn(@sprintf("Top result for %s %s", fun, args))
             end=#
@@ -921,15 +897,15 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
     end
 end
 
-function eval_new!{V}(sched::Scheduler, t::Thread, args::V...)
+function eval_new!{V}(sched::Scheduler, t::Thread, sd::StateDiff, args::V...)
     any(isbot, args) && return bot(V)
-    eval_call!(sched, t, V, meet(top(V), Const(OtherBuiltins.new)), args)
+    eval_call!(sched, t, sd, V, meet(top(V), Const(OtherBuiltins.new)), args)
 end
 
-@generated function eval_call!{Ls}(sched::Scheduler, t::Thread, ::Type{Prod{Ls}}, f::Prod{Ls}, args::Tuple{Vararg{Prod{Ls}}})
+@generated function eval_call!{Ls}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Prod{Ls}}, f::Prod{Ls}, args::Tuple{Vararg{Prod{Ls}}})
     ex = :(top(Prod{Ls}))
     for L in Ls.types
-        ex = :(meet($ex, eval_call!(sched, t, $L, f, args)))
+        ex = :(meet($ex, eval_call!(sched, t, sd, $L, f, args)))
     end
     ex
 end
@@ -938,7 +914,7 @@ end
 const BITS_INTR = [Base.add_float,Base.add_int, Base.sub_int, Base.mul_int, Base.srem_int, Base.ctlz_int, Base.slt_int, Base.sle_int, Base.not_int,Base.apply_type, Base.issubtype, Base.tuple, Base.nfields, Core.sizeof, Base.fieldtype, Base.Union, Base.svec, OtherBuiltins.isleaftype, Base.is]
 const BITS_FUNC = [+,+, -, *, %, leading_zeros, <, <=, !, Base.apply_type, Base.issubtype, Base.tuple, Base.nfields, Core.sizeof, Base.fieldtype, Base.Union, Base.svec, OtherBuiltins.isleaftype, Base.is]
 @assert length(BITS_INTR) == length(BITS_FUNC)
-function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Sign}, f::V, args::Tuple{Vararg{V}})
+function eval_call!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Sign}, f::V, args::Tuple{Vararg{V}})
     if (f <= Const(Base.unbox) || f <= Const(Base.box))
         return convert(V,convert(Sign,args[2]))
     end
@@ -999,7 +975,7 @@ const INTR_TYPES = [
                     ]
 const FA_INTR = [Base.trunc_int, Base.sext_int, Base.zext_int, Base.checked_trunc_uint, Base.checked_trunc_sint, Base.uitofp, Base.sitofp, Base.fptosi, Base.box, Base.unbox, OtherBuiltins.new, Base.checked_fptosi, Base.checked_fptoui]
 
-function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Ty}, f::V, args::Tuple{Vararg{V}})
+function eval_call!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Ty}, f::V, args::Tuple{Vararg{V}})
     if length(args) >= 1
         for bf in FA_INTR
             if f <= Const(bf)
@@ -1132,7 +1108,7 @@ function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Ty}, f::V, args::Tupl
     top(V)
 end
 
-function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Const}, f::V, args::Tuple{Vararg{V}})
+function eval_call!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Const}, f::V, args::Tuple{Vararg{V}})
     # only evaluate when every argument is constant
     cargs = map(a -> convert(Const, a), args)
     any(a -> istop(a), cargs) && return top(V)
@@ -1189,7 +1165,7 @@ function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Const}, f::V, args::T
     end
     top(V)
 end
-function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Birth}, f::V, args::Tuple{Vararg{V}})
+function eval_call!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Birth}, f::V, args::Tuple{Vararg{V}})
     if  f <= Const(OtherBuiltins.new) ||
         f <= Const(OtherBuiltins.new_array) ||
         f <= Const(OtherBuiltins.new_array_1d) ||
@@ -1199,7 +1175,7 @@ function eval_call!{V}(sched::Scheduler, t::Thread, ::Type{Birth}, f::V, args::T
     end
     top(V)
 end
-function eval_call!{V,EV}(sched::Scheduler, t::Thread, ::Type{ConstCode{EV}}, f::V, args::Tuple{Vararg{V}})
+function eval_call!{V,EV}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{ConstCode{EV}}, f::V, args::Tuple{Vararg{V}})
     if f <= Const(OtherBuiltins.new)
         ty = convert(Const, args[1])
         (istop(ty) || ty.v != Function) && return top(V)
@@ -1227,20 +1203,20 @@ function eval_sym{V}(sched::Scheduler{V},t,sd,code,e)
     elseif isa(e,Symbol) && isconst(code.mod,e)
         eval_lit(V, eval(code.mod,e))
     else
-        may_throw(sd, Ty(UndefVarError))
+        may_throw!(sd, Ty(UndefVarError))
         top(V) # global
     end
 end
-StateDiff(LV,TV) = StateDiff(Array(LocalStateDiff{LV},0), bot(LV), bot(TV), false)
+StateDiff(t,LV,TV) = StateDiff(t,Array(LocalStateDiff{LV},0), bot(LV), bot(TV), false)
 function Base.copy(sd::StateDiff)
-    StateDiff(copy(sd.locals), sd.value, sd.thrown, sd.must_throw)
+    StateDiff(sd.t,copy(sd.locals), sd.value, sd.thrown, sd.must_throw)
 end
 
-function may_throw(sd :: StateDiff, v)
+function may_throw!(sd :: StateDiff, v)
     sd.thrown = join(sd.thrown, v)
 end
 
-function must_throw(sd :: StateDiff, v)
+function must_throw!(sd :: StateDiff, v)
     sd.thrown = join(sd.thrown, v)
     sd.must_throw = true
 end
@@ -1250,7 +1226,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     TRACE = GTRACE
     code = sched.funs[t.fc]
     values = sched.values
-    sd = StateDiff(V,Ty)#Array(LocalStateDiff{V}, 0)
+    sd = StateDiff(t,V,V)#Array(LocalStateDiff{V}, 0)
     
     TRACE && println("Step thread ",t.fc, ":", t.pc)
     next_pc = branch_pc = t.pc+1
@@ -1267,18 +1243,16 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             final = sched.states.finals[ft.wait_on]
         end
         # TODO move into function
-        #t.final, _ = join!(t.final, :thrown, final.thrown)
-        #t.final.must_throw = t.final.must_throw | final.must_throw
         if final.must_throw
-            must_throw(sd, final.thrown)
+            must_throw!(sd, final.thrown)
         else
-            may_throw(sd, final.thrown)
+            may_throw!(sd, final.thrown)
         end
         final.ret_val
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
         args = map(i -> values[t.fc,i], code.call_args[t.pc])
         if e.head === :new
-            eval_new!(sched, t, args...)
+            eval_new!(sched, t, sd, args...)
         else
             eval_call!(sched, t, sd, args[1], tuple(args[2:end]...))
         end
@@ -1439,6 +1413,7 @@ function step!(s::Scheduler)
         mincycle = isdone ? -1 : minimum([s.threads[i].cycle for i in same_func])
         #println("Thread finished at ", s.funs[fc], " : ", t.cycle, " min ", mincycle)
         if !isdone && mincycle > t.cycle
+            isdone = mincycle > s.states.finals[fc].last_cycle
             #isdone = !has_changed(s.final, fc)
             #reset_changed(s.final, fc)
         end
@@ -1458,13 +1433,13 @@ function step!(s::Scheduler)
     end
 end
 LIM = 500000
-function run(s::Scheduler)
+function run(s::Scheduler; verbose = false)
     nstep = 0
     maxthread = length(s.threads)
     while !done(s) && nstep < LIM
         step!(s)
         maxthread = max(maxthread, length(s.threads))
-        if nstep % 10000 == 0
+        if verbose && nstep % 10000 == 0
             println("... (", maxthread, ", ", length(s.funs), ")")
             #println(s)
         end
@@ -1697,7 +1672,7 @@ function displayfun(s::Scheduler, fc::Int)
     display("text/html", readall(b))
 end
 
-export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ConstCode,LocalStore,State
+export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ConstCode,LocalStore,State, isbot, istop
 
 # == client
 
@@ -1708,24 +1683,52 @@ const FinalT = FinalState{ValueT}
 make_sched(conf) = Scheduler(ExprState(ValueT),State(ValueT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
 end
 
+immutable Stats
+    n_iteration
+    max_concurrent_threads
+    total_time
+end
+
+function Base.show(io::IO, s::Stats)
+    dt = s.total_time
+    niter = s.n_iteration
+    maxthr = s.max_concurrent_threads
+    @printf("Analysis completed in %.2f s\n", dt)
+    @printf("\t%d max concurrent threads\n", maxthr)
+    if niter >= 1000
+        @printf("\t%.2f iterations\n", niter/1000)
+    else
+        @printf("\t%d iterations\n", niter)
+    end
+    @printf("\t%.2f Kit/s\n", (niter/1000)/dt)
+end
+
 function run(f::Function, args)
     sched = Analysis.make_sched(Config(:always))
-    eval_call_gf!(sched, Thread(0,0), f, map(a->convert(Analysis.ValueT, a), args))
+    args = map(args) do a
+        if isa(a,Tuple)
+            foldl(meet, top(Analysis.ValueT), a)
+        else
+            convert(Analysis.ValueT, a)
+        end
+    end
+    eval_call_gf!(sched, Thread(0,0), f, args)
     dt = @elapsed begin
         niter,maxthr = run(sched)
     end
-    println("Finished in ", niter, " ", maxthr, " threads :")
-    @printf("Speed %.2f Kit/s for %.2f s\n", (niter/1000)/dt, dt)
-    #println("Result : ", sched.final[1])
-    read(STDIN,Char)
-    sched
+    sched, Stats(niter, maxthr, dt)
+end
+
+function test(after::Function, f::Function, args...)
+    s, stats = run(f, args)
+    after(s.states.finals[1])
 end
 
 function RUN(F::Function,args::ANY)
     sched = Analysis.make_sched(Config(:always))
     eval_call_gf!(sched, Thread(0,0), F, map(a->convert(Analysis.ValueT, Ty(a)), args))
     dt = @elapsed begin
-        niter,maxthr = run(sched)
+        niter,maxthr = run(sched, verbose=true)
     end
     println("Finished in ", niter, " ", maxthr, " threads :")
     @printf("Speed %.2f Kit/s for %.2f s\n", (niter/1000)/dt, dt)
@@ -1733,58 +1736,4 @@ function RUN(F::Function,args::ANY)
     #read(STDIN,Char)
     sched
 end
-DOIT() = GreenFairy.RUN(DOIT, ())
-end
-#=sched = GreenFairy.RUN(GreenFairy.F, ())
-@show @code_typed GreenFairy.eval_call!(sched, sched.done_threads[1], sched.ret_values[1])
-sched = @time for i=1:2; GreenFairy.RUN(GreenFairy.DOIT, ()); end=#
-
-function F()
-    x = 3
-    y = 5
-    if x+y < 0 || x >= 0
-        z = UNKNOWN
-        while UNKNOWN
-            y += 1
-        end
-        z = z+1
-        if y < 0
-            y = -3
-            x = -2
-        end
-    else
-        x = y = -3
-    end
-
-    return y
-end
-
-G(z::Int) = z-1
-
-function K()
-#=    x = 3
-    while UNKNOWN
-        x = x+1
-    end
-    return x
-    x = 3
-    y = G(x+1)
-    return y=#
-    x = 3
-    x = G(22)
-    x
-end
-#K() = Base.typeinf(UNKNOWN,UNKNOWN,UNKNOWN)
-#GreenFairy.RUN(GreenFairy.DOIT,())
-
-FA(n) = n > 0 ? FA(n-1) : UNKNOWN ? throw(n) : n
-FB(n) = throw(n)
-function F()
-    try
-        #FB(3)
-        throw(3)
-    catch x
-        return x
-    end
-    return 32.0
 end
