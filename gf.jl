@@ -607,7 +607,7 @@ type FinalState{V} <: Lattice
     thrown :: Ty
     must_throw :: Bool
 end
-bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),bot(Ty),false)
+bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),bot(Ty),true)
 function Base.show(io::IO, s::FinalState)
     print(io, "(returned: ", s.ret_val)
     if !isbot(s.thrown)
@@ -627,6 +627,13 @@ function same_state(s::State, fc::Int, pc::Int, sd)
 end
 function Base.getindex(s::State, fc::Int, pc::Int)
     s.funs[fc][pc]
+end
+
+type StateDiff{V,TV}
+    locals :: Vector{LocalStateDiff{V}}
+    value :: V
+    thrown :: TV
+    must_throw :: Bool
 end
 
 
@@ -825,7 +832,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args,env)
     fc
 end
 
-function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, fun::V, args::Tuple{Vararg{V}}) #TODO move args to an ANY tuple to avoid recompilation
+function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V, args::Tuple{Vararg{V}}) #TODO move args to an ANY tuple to avoid recompilation
     any(isbot, args) && (#=println("bot arg ", args); =#return bot(V))
     f = convert(Const,fun)
     if f <= Const(Base._apply)
@@ -863,6 +870,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, fun::V, args::Tuple{V
             push!(sched.called_by[fc], (t.fc,t.pc))
             nothing
         elseif fc == -1
+            must_throw(sd, Ty(MethodError))
             bot(V)
         else
             top(V)
@@ -1206,7 +1214,7 @@ function eval_call!{V,EV}(sched::Scheduler, t::Thread, ::Type{ConstCode{EV}}, f:
 end
 
 function eval_assign!{V}(sched,sd,code,name,res::V)
-    if name in code.locals || isa(e,GenSym)
+    if name in code.locals || isa(name,GenSym)
         push!(sd.locals, LocalStateDiff(name, res))
     else
         # TODO unknown effects
@@ -1223,13 +1231,6 @@ function eval_sym{V}(sched::Scheduler{V},t,sd,code,e)
         top(V) # global
     end
 end
-
-type StateDiff{V,TV}
-    locals :: Vector{LocalStateDiff{V}}
-    value :: V
-    thrown :: TV
-    must_throw :: Bool
-end
 StateDiff(LV,TV) = StateDiff(Array(LocalStateDiff{LV},0), bot(LV), bot(TV), false)
 function Base.copy(sd::StateDiff)
     StateDiff(copy(sd.locals), sd.value, sd.thrown, sd.must_throw)
@@ -1241,7 +1242,7 @@ end
 
 function must_throw(sd :: StateDiff, v)
     sd.thrown = join(sd.thrown, v)
-    sd.must_throw &= true
+    sd.must_throw = true
 end
 
 
@@ -1268,13 +1269,18 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         # TODO move into function
         #t.final, _ = join!(t.final, :thrown, final.thrown)
         #t.final.must_throw = t.final.must_throw | final.must_throw
+        if final.must_throw
+            must_throw(sd, final.thrown)
+        else
+            may_throw(sd, final.thrown)
+        end
         final.ret_val
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
         args = map(i -> values[t.fc,i], code.call_args[t.pc])
         if e.head === :new
             eval_new!(sched, t, args...)
         else
-            eval_call!(sched, t, args[1], tuple(args[2:end]...))
+            eval_call!(sched, t, sd, args[1], tuple(args[2:end]...))
         end
     elseif isa(e, LocalName)
         if e === :UNKNOWN
@@ -1362,7 +1368,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
 
     if next_pc != branch_pc
         branch_chgd = propagate!(sched.states, t.fc, t.pc, branch_pc, branch_sd)
-        if branch_chgd || values.changed
+        if (branch_chgd || values.changed) && branch_pc <= length(code.body)
             ft = fork(sched, t, branch_pc)
         end
     end
