@@ -6,7 +6,7 @@ using GreenFairy
 using Base.Test
 
 VERB = true
-
+GreenFairy.start_test()
 
 VERB && println("basics")
 function f2()
@@ -33,6 +33,12 @@ GreenFairy.test(f3, (Ty(Int),Sign(0))) do r
     @test r.ret_val <= Sign(1)
     @test isbot(r.thrown)
 end
+# test argument declarations
+g1(x::Int) = x
+GreenFairy.test(g1, ()) do r
+    @test r.ret_val <= Ty(Int)
+end
+
 
 VERB && println("recursion")
 function f4(x)
@@ -134,4 +140,4 @@ GreenFairy.test(f10) do r
     @test r.ret_val <= Const(3)
 end
 
-VERB && println("ok !")
+VERB && GreenFairy.end_test()
