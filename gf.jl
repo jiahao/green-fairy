@@ -70,6 +70,8 @@ end
 const L3e = L3(0)
 top(::Type{L3}) = L3(1 % Int8)
 bot(::Type{L3}) = L3(-1 % Int8)
+isbot(x::L3) = x.v == Int8(-1)
+istop(x::L3) = x.v == Int8(1)
 <=(x::L3,y::L3) = x.v <= y.v
 Base.show(io::IO, x::L3) = print(io, istop(x) ? "top" : isbot(x) ? "bot" : "L3.e")
 
@@ -93,7 +95,6 @@ end
 Const(v::ANY) = Const(L3e, v)
 top(::Type{Const}) = Const(top(L3), ())
 bot(::Type{Const}) = Const(bot(L3), ())
-eval_lit(::Type{Const}, v::ANY) = Const(v)
 ==(x::Const,y::Const) = x.tag == y.tag && (x.tag != L3e || x.v === y.v)
 
 immutable ConstCode{EnvT} <: TagLattice
@@ -108,7 +109,6 @@ ConstCode{E}(::Type{E},v::Code,::Tuple{}) = ConstCode{E}(L3e, v, ())
 ConstCode{E}(::Type{E},v::Code,env::Tuple{Vararg{E}}) = ConstCode{E}(L3e, v, env)
 top{E}(::Type{ConstCode{E}}) = ConstCode{E}(top(L3))
 bot{E}(::Type{ConstCode{E}}) = ConstCode{E}(bot(L3))
-eval_lit{E}(::Type{ConstCode{E}}, v::ANY) = top(ConstCode{E})
 ==(x::ConstCode,y::ConstCode) = x.tag == y.tag && (x.tag != L3e || x.v === y.v)
 
 # ========== Sign
@@ -130,21 +130,30 @@ function join(x::Sign,y::Sign)
     top(Sign)
 end
 meet(x,y) = x <= y ? x : y
-eval_lit(::Type{Sign}, v::ANY) = top(Sign)
-eval_lit(::Type{Sign}, v::Int) = Sign(sign(v))
-eval_lit(::Type{Sign}, v::FloatingPoint) = isnan(v) ? top(Sign) : Sign(round(Int, sign(v)))
 
 # ========== Type
 
 function widen(t::ANY) #TODO better this
     if isa(t,UnionType)
-        Union(map(widen, t.types)...)
+        ut = t::UnionType
+        n = length(ut.types)
+        if n == 0
+            ut
+        else
+            r = Array(Any, n)
+            for i=1:n
+                r[i] = widen(ut.types[i])
+            end
+            Union(r...)
+        end
     elseif t <: Tuple
-        Core.Inference.limit_tuple_depth(Core.Inference.limit_tuple_type(t))
+        tt = t::DataType
+        Core.Inference.limit_tuple_depth(Core.Inference.limit_tuple_type(tt))
     elseif isa(t,DataType) && t.name === Type.name
         Type
     elseif isa(t,TypeVar)
-        t.ub
+        tv = t::TypeVar
+        tv.ub
     else
         t
     end
@@ -152,10 +161,12 @@ end
 
 immutable Ty <: Lattice
     ty :: Type
-    Ty(t::ANY) = (new(widen(t)))
+    Ty(t::ANY) = (tt = widen(t)::Type; new(tt))
 end
 top(::Type{Ty}) = Ty(Any)
 bot(::Type{Ty}) = Ty(Union())
+istop(t::Ty) = t.ty === Any
+isbot(t::Ty) = isa(t.ty,UnionType) && length((t.ty::UnionType).types) == 0
 function Base.show(io::IO, x::Ty)
     istop(x) && return print(io, "top")
     isbot(x) && return print(io, "bot")
@@ -165,7 +176,6 @@ end
 ==(x::Ty,y::Ty) = Base.typeseq(x.ty,y.ty)
 join(x::Ty,y::Ty) = Ty(Core.Inference.tmerge(x.ty,y.ty))
 meet(x::Ty,y::Ty) = Ty(typeintersect(x.ty,y.ty))
-eval_lit(::Type{Ty}, v::ANY) = Ty(typeof(v))
 
 immutable Kind <: TagLattice
     tag :: L3
@@ -191,7 +201,7 @@ function meet(x::Kind,y::Kind)
     istop(y) && return x
     Kind(meet(x.ub,y.ub))
 end
-eval_lit(::Type{Kind}, v::ANY) = isa(v,Type) ? Kind(Ty(v)) : top(Kind)
+
     
 Base.show(io::IO,k::Kind) = istop(k) ? print(io, "top") : isbot(k) ? print(io, "bot") : print(io, "kind(", k.ub, ")")
 
@@ -215,9 +225,36 @@ function join(x::Birth,y::Birth)
     y <= x && return x
     top(Birth)
 end
-eval_lit(::Type{Birth}, v::ANY) = top(Birth)
-
 meet(x,y) = x <= y ? x : y
+
+immutable AliasOf <: TagLattice
+    tag :: L3
+    sa :: Int
+    fn :: Symbol
+    AliasOf(tag::L3) = new(tag)
+    AliasOf(tag::L3,sa::Int,fn::Symbol) = nw(tag,sa,fn)
+end
+
+top(::Type{AliasOf}) = AliasOf(top(L3))
+bot(::Type{AliasOf}) = AliasOf(bot(L3))
+AliasOf(sa::Int) = AliasOf(L3e, sa, symbol(""))
+AliasOf(sa::Int,f::Symbol) = AliasOf(L3e, sa, f)
+<=(x::AliasOf, y::AliasOf) = istop(y.tag) || isbot(x.tag) || (x.tag == y.tag == L3e && x.sa == y.sa)
+function join(x::AliasOf, y::AliasOf)
+    (istop(x) || istop(y)) && return top(AliasOf)
+    isbot(x) && return y
+    isbot(y) && return x
+    x.sa == y.sa && return x
+    top(AliasOf)
+end
+function meet(x::AliasOf,y::AliasOf)
+    (isbot(x) || isbot(y)) && return bot(AliasOf)
+    istop(x) && return y
+    istop(y) && return x
+    x.sa == y.sa && return x
+    bot(AliasOf)
+end
+
 
 # ========== Reduced product
 # one day we may switch back to the non-staged version if the compiler gets smart enough
@@ -316,11 +353,6 @@ end=#
     end
     idx > 0 || error("converting " * string(L) * " : " * string(x))
     :(x.values[$idx])
-end
-#eval_lit{Ls}(::Type{Prod{Ls}}, v) = Prod(tuple(map(T->eval_lit(T, v), Ls.types)...))
-@generated function eval_lit{Ls}(::Type{Prod{Ls}}, v::ANY)
-    args = [:(eval_lit($L, v)) for L in Ls.types]
-    :(prod(tuple($(args...))))
 end
 
 @generated function meet{L,Ls}(x::Prod{Ls},y::L)
@@ -528,17 +560,38 @@ end
 
 type LocalStore{V}
     locals :: Dict{LocalName,StateCell{V}}
+    sa :: Vector{StateCell{V}}
     len :: Int
 end
 function Base.getindex(s::LocalStore, pc)
     [ k => v[pc] for (k,v) in  s.locals ]
 end
-LocalStore{V}(::Type{V}, n::Int) = LocalStore(Dict{LocalName,StateCell{V}}(), n)
+LocalStore{V}(::Type{V}, n::Int) = LocalStore(Dict{LocalName,StateCell{V}}(), [StateCell(V,n) for i=1:n+1], n)
+type Thread
+    fc :: Int
+    pc :: Int
+    wait_on :: Vector{Int} # fc we need to continue
+    cycle :: Int
+    eh_stack :: Vector{Int} # pc of handler
+end
+Thread(f,p) = Thread(f,p,Array(Int,0),0,Array(Int,0))
 immutable LocalStateDiff{V}
     name :: LocalName
     val :: V
 end
-function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,d::Vector{LocalStateDiff{V}})
+type StateDiff{V,TV}
+    t::Thread
+    locals :: Vector{LocalStateDiff{V}}
+    sa :: Vector{Tuple{Int,V}}
+    lost :: Vector{Birth}
+    value :: V
+    thrown :: TV
+    must_throw :: Bool
+end
+
+
+function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
+    d = sd.locals
     for lsd in d
         if !haskey(s.locals, lsd.name)
             s.locals[lsd.name] = StateCell(V, s.len)
@@ -546,11 +599,30 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,d::Vector{LocalStateDi
     end
     chgd = false
     for (k,v) in s.locals
-        idx = findlast(lsd->lsd.name == k, d)
+        idx = 0
+        for j=1:length(d)
+            if d[j].name === k
+                idx = j
+            end
+        end
         if idx > 0
             chgd |= propagate!(v,pc,next,d[idx].val)
         else
             chgd |= propagate!(v,pc,next)
+        end
+    end
+    d = sd.sa
+    for i=1:s.len+1
+        idx = 0
+        for j = 1:length(d)
+            if d[j][1] == i
+                idx = j
+            end
+        end
+        if idx > 0
+            chgd |= propagate!(s.sa[i], pc, next, d[idx][2])
+        else
+            chgd |= propagate!(s.sa[i], pc, next)
         end
     end
     chgd
@@ -562,6 +634,11 @@ function eval_local{V}(s::LocalStore{V}, pc::Int, name::LocalName)
         s.locals[name][pc]
     end
 end
+
+function eval_local{V}(s::LocalStore{V}, pc::Int, name::Int)
+    s.sa[name][pc]
+end
+
 function same_state{V}(s::LocalStore{V}, pc::Int, d::Vector{LocalStateDiff{V}})
     for lsd in d
         if !haskey(s.locals, lsd.name)
@@ -569,7 +646,12 @@ function same_state{V}(s::LocalStore{V}, pc::Int, d::Vector{LocalStateDiff{V}})
         end
     end
     for (k,v) in s.locals
-        idx = findlast(lsd->lsd.name == k, d)
+        idx = 0
+        for j=1:length(d)
+            if d[j].name === k
+                idx = j
+            end
+        end
         if idx > 0
             if !same_state(v,pc,d[idx].val)
                 return false
@@ -593,7 +675,7 @@ function ensure_filled!{V,F}(s::State{V,F}, fc::Int, code::Code)
     push!(s.finals, bot(F))
     push!(s.lost, Set{Birth}())
 end
-eval_local(s::State, fc::Int, pc::Int, name::LocalName) = eval_local(s.funs[fc], pc, name)
+eval_local(s::State, fc::Int, pc::Int, name) = eval_local(s.funs[fc], pc, name)
 function propagate!(s::State,fc::Int,pc::Int,next::Int,sd)
     chgd = false
     
@@ -606,7 +688,7 @@ function propagate!(s::State,fc::Int,pc::Int,next::Int,sd)
         chgd |= propagate!(s,s.finals[fc],fc,pc,sd)
 #        istop(s.finals[fc].ret_val) && nottop && fc == 1 && error()
     end
-    chgd |= propagate!(s.funs[fc],pc,next,sd.locals)
+    chgd |= propagate!(s.funs[fc],pc,next,sd)
     chgd
 end
 
@@ -658,26 +740,8 @@ function Base.getindex(s::State, fc::Int, pc::Int)
     s.funs[fc][pc]
 end
 
-type Thread
-    fc :: Int
-    pc :: Int
-    wait_on :: Vector{Int} # fc we need to continue
-    cycle :: Int
-    eh_stack :: Vector{Int} # pc of handler
-end
-Thread(f,p) = Thread(f,p,Array(Int,0),0,Array(Int,0))
-
-type StateDiff{V,TV}
-    t::Thread
-    locals :: Vector{LocalStateDiff{V}}
-    lost :: Vector{Birth}
-    value :: V
-    thrown :: TV
-    must_throw :: Bool
-end
 
 type Scheduler{ValueT,StateT}
-    values :: ExprState{ValueT}
     states :: StateT
     done :: Vector{Bool}
     threads :: Vector{Thread}
@@ -690,7 +754,6 @@ end
 function register_fun!(sched::Scheduler, fcode::Code)
     push!(sched.funs, fcode)
     fc = length(sched.funs)
-    ensure_filled!(sched.values, fc, fcode)
     ensure_filled!(sched.states, fc, fcode)
     push!(sched.done, false)
     push!(sched.called_by, Set{Any}())
@@ -744,9 +807,11 @@ end
 
 meet_ext(v::Lattice, v2::Lattice) = v
 meet_ext{T}(v::T,v2::T) = v
-meet_ext(v::Ty, v2::Const) = istop(v2) ? v : eval_lit(Ty,v2.v)
-meet_ext(v::Kind, v2::Const) = istop(v2) || !isa(v2.v,Type) ? v : eval_lit(Kind,v2.v)
+meet_ext(v::Ty, v2::Const) = istop(v2) ? v : Ty(typeof(v2.v))
+meet_ext(v::Kind, v2::Const) = istop(v2) || !isa(v2.v,Type) ? v : Kind(Ty(v2.v))
 meet_ext(v::Const, v2::Kind) = istop(v2) || !isleaftype(v2.ub.ty) ? v : Const(v2.ub.ty)
+meet_ext(v::Sign, v2::Const) = istop(v2) || !isa(v2.v,Int) ? v : Sign(sign(v2.v))
+
 function meet_ext(v::Const,v2::Ty)
     if isdefined(v2.ty, :instance)
         Const(v2.ty.instance)
@@ -772,7 +837,7 @@ function to_signature(args)
 end
 
 # takes the tuple returned as first argument of _methods
-function code_for_method(metht, argtypes)
+function code_for_method(metht, argtypes::ANY)
     meth = metht[3]
     func = meth.func
     tenv = metht[2]
@@ -786,59 +851,12 @@ function code_for_method(metht, argtypes)
             end                
             _staged_cache[key] = func
         else
-            _staged_cache[key]
+            _staged_cache[key] :: Function
         end
     else
         func
     end
     ConstCode(Ty, code_from_ast(func.code, tenv, meth.sig), ())
-end
-
-function dispatch_proposal!{V}(::Type{Ty},sched,t,prop::Vector{ConstCode},fun::V,args::Tuple{Vararg{V}})
-    cf = convert(Const,fun)
-    istop(cf) && return
-    f = cf.v
-    isa(f,Function) && isgeneric(f) || !isa(f,Function) && !isa(f,IntrinsicFunction) || return
-    
-    if !isa(f,Function)
-        f = getfield(sched.funs[t.fc].mod, :call) # call overloading
-        args = tuple(fun, args...)
-    end
-
-    argtypes = to_signature(args)
-
-    meths = Base._methods(f,argtypes,4)
-
-    if meths === false
-        return
-    end
-    if length(meths) == 0
-        push!(prop, bot(ConstCode{Ty}))
-        return 
-    end
-    for i=1:length(meths)
-        meth = meths[i][3]
-        func = meth.func
-        tenv = meths[i][2]
-        func = if meth.isstaged
-            key = (meth, argtypes, tenv)
-            if !haskey(_staged_cache, key)
-                try
-                    func = ccall(:jl_instantiate_staged, Any,(Any,Any,Any), meth, Tuple{argtypes...}, tenv)
-                catch
-                    continue
-                end                
-                _staged_cache[key] = func
-            else
-                _staged_cache[key]
-            end
-        else
-            func
-        end
-        c = ConstCode(Ty, code_from_ast(func.code, tenv, meth.sig), ())
-        push!(prop, c)
-    end
-    
 end
 
 # canonicalize those to function calls
@@ -923,6 +941,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args,env)
     fc = 0
     for fc2 in 1:length(sched.funs)
         if sched.funs[fc2] === fcode
+            @assert isempty(sd.sa)
             if same_state(sched.states, fc2, 1, sd.locals)
                 fc = fc2
                 break
@@ -988,7 +1007,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
         end
 
         argtypes = to_signature(args)
-        meths = Base._methods(f,argtypes,4)
+        meths = Base._methods(f,argtypes,1)
         if meths !== false
             for meth in meths
                 cc = code_for_method(meth, argtypes)
@@ -1316,10 +1335,11 @@ function eval_call!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Birth}
     end
     top(V)
 end
+
 function eval_call!{V,EV}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{ConstCode{EV}}, f::V, args::Tuple{Vararg{V}})
     if f <= Const(OtherBuiltins.new)
         ty = convert(Const, args[1])
-        (istop(ty) || ty.v != Function) && return top(V)
+        (istop(ty) || ty.v !== Function) && return top(V)
         code = convert(Const, args[2])
         istop(code) && return top(V)
         actual_code = code_from_ast(code.v, (), Tuple)
@@ -1342,15 +1362,15 @@ function eval_sym{V}(sched::Scheduler{V},t,sd,code,e)
     if e in code.locals || isa(e,GenSym)
         eval_local(sched.states, t.fc, t.pc, e)
     elseif isa(e,Symbol) && isconst(code.mod,e)
-        eval_lit(V, eval(code.mod,e))
+        convert(V, Const(getfield(code.mod,e)))
     else
         may_throw!(sd, Ty(UndefVarError))
         top(V) # global
     end
 end
-StateDiff(t,LV,TV) = StateDiff(t,Array(LocalStateDiff{LV},0), Array(Birth,0), bot(LV), bot(TV), false)
+StateDiff(t,LV,TV) = StateDiff(t,Array(LocalStateDiff{LV},0), Array(Tuple{Int,LV},0), Array(Birth,0), bot(LV), bot(TV), false)
 function Base.copy(sd::StateDiff)
-    StateDiff(sd.t, copy(sd.locals), copy(sd.lost), sd.value, sd.thrown, sd.must_throw)
+    StateDiff(sd.t, copy(sd.locals), copy(sd.sa), copy(sd.lost), sd.value, sd.thrown, sd.must_throw)
 end
 
 function may_throw!(sd :: StateDiff, v)
@@ -1362,11 +1382,9 @@ function must_throw!(sd :: StateDiff, v)
     sd.must_throw = true
 end
 
-
 function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     TRACE = GTRACE
     code = sched.funs[t.fc]
-    values = sched.values
     sd = StateDiff(t,V,V)#Array(LocalStateDiff{V}, 0)
     
     TRACE && println("Step thread ",t.fc, ":", t.pc)
@@ -1398,7 +1416,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         end
         final.ret_val
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
-        args = map(i -> values[t.fc,i], code.call_args[t.pc])
+        args = map(i -> eval_local(sched.states,t.fc,t.pc,i), code.call_args[t.pc])
         if e.head === :new
             eval_new!(sched, t, sd, args...)
         else
@@ -1416,7 +1434,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         # internally
         eval_new!(sched, t, sd, convert(V,Const(Function)), convert(V,Const(e)))
     elseif isa(e,Expr) && e.head === :return
-        retval = values[t.fc,code.call_args[t.pc][1]]
+        retval = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
         next_pc = branch_pc = length(code.body)+1
         retval
     elseif isa(e,GotoNode)
@@ -1424,7 +1442,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         convert(V,Const(nothing))
     elseif isa(e,Expr) && e.head === :gotoifnot
         branch_pc = code.label_pc[e.args[2]::Int+1]
-        val = values[t.fc,code.call_args[t.pc][1]]
+        val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
         if val <= Const(true)
             branch_pc = next_pc
         elseif val <= Const(false)
@@ -1433,7 +1451,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         val
     elseif isa(e,Expr) && e.head === :(=)
         @assert next_pc == branch_pc
-        val = values[t.fc,code.call_args[t.pc][1]]
+        val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
         eval_assign!(sched, sd, code, e.args[1]::LocalName, val)
         val
     elseif isa(e,Expr) && e.head == :enter
@@ -1455,11 +1473,12 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         elseif isa(e, QuoteNode)
             e = e.value
         end
-        eval_lit(V,e)
+        convert(V,Const(e))
     end
     if !isempty(t.wait_on)
         return
     end
+    push!(sd.sa, (t.pc, res))
     sd.value = res
     
     TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", res))
@@ -1484,23 +1503,22 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             push!(branch_sd.locals, exc_sd)
         end
     end
-    if !must_throw
+    #=if !must_throw
         values[t.fc,t.pc] = res
-    end
+    end=#
 
     chgd = propagate!(sched.states, t.fc, t.pc, next_pc, sd)
 
     if next_pc != branch_pc
         branch_chgd = propagate!(sched.states, t.fc, t.pc, branch_pc, branch_sd)
-        if (branch_chgd || values.changed) && branch_pc <= length(code.body)
+        if branch_chgd && branch_pc <= length(code.body)
             ft = fork(sched, t, branch_pc)
         end
     end
     
-    if !chgd && !values.changed
+    if !chgd
         next_pc = length(code.body)+1
     end
-    values.changed = false
     
     t.pc = next_pc
     nothing
@@ -1508,6 +1526,19 @@ end
 
 Base.done(s::Scheduler,t::Thread) = t.pc > length(s.funs[t.fc].body)
 Base.done(s::Scheduler) = isempty(s.threads)
+function Base.isless(t::Thread,t2::Thread)
+    t.fc < t2.fc && return false
+    t.fc > t2.fc && return true
+    t.cycle > t2.cycle && return false
+    t.cycle < t2.cycle && return true
+    ie = isempty(t.wait_on)
+    ie2 = isempty(t2.wait_on)
+    !ie && ie2 && return false
+    ie && !ie2 && return true
+    t.pc > t2.pc && return false
+    t.pc < t2.pc && return true
+    false
+end
 function step!(s::Scheduler)
     #=n = length(s.threads)
     while n > 0
@@ -1517,42 +1548,23 @@ function step!(s::Scheduler)
         end
         n -= 1
     end=#
-    sort!(s.threads, by = t -> (-t.fc, t.cycle, t.wait_on == 0, t.pc))
+    sort!(s.threads)
 #=    if n == 0
         n = length(s.threads)
     end=#
     n = 1
     t = s.threads[n]
     k = 0
-    #=while n < length(s.threads) &&
-        s.threads[n+1].fc == t.fc &&
-        s.threads[n+1].cycle == t.cycle &&
-        s.threads[n+1].wait_on == t.wait_on &&
-        s.threads[n+1].pc == t.pc
-        k+=1
-        t.state,chg = join!(t.state, s.threads[n+1].state)
-        t.final,chg2 = join!(t.final, s.threads[n+1].final)
-        if chg | chg2
-            t.visited = intersect(t.visited, s.threads[n+1].visited)
-        else
-            union!(t.visited, s.threads[n+1].visited)
-        end
-        deleteat!(s.threads, n+1)
-    end=#
     try
         step!(s, t, s.config)
     catch x
         println("Exception while executing ", t)
         println("Function : ", s.funs[t.fc])
         read(STDIN, Char)
-        println(s)
+        #println(s)
         rethrow(x)
     end
-#=    if s.state.changed
-        t.pc = 1
-        t.ec = 1
-        t.wait_on = nothing
-    else=#if done(s,t)# || !(.state.changed || s.values.changed || t.wait_on != nothing)
+    if done(s,t)
         fc = t.fc
         t.pc = length(s.funs[fc].body) + 1
         #join!(s.final, fc, t.final)
@@ -1683,12 +1695,12 @@ function eval_typ_in(ty, tenv)
     end
 end
 
-const _code_cache = Dict{Any,Code}()
+const _code_cache = ObjectIdDict()#Dict{Any,Code}()
 const SR = []
-function code_from_ast(linf,tenv,sig)
+function code_from_ast(linf,tenv,sig::ANY)
     TRACE = GTRACE
-    key = (linf,collect(tenv)) # TODO svec don't hash correctly with tvars ?
-    haskey(_code_cache, key) && return _code_cache[key]
+    key = (linf,tenv) # TODO svec don't hash correctly with tvars ?
+    haskey(_code_cache, key) && return (_code_cache[key]::Code)
     fun_name = linf.name
     mod = linf.module
     ast = Base.uncompressed_ast(linf)
@@ -1769,42 +1781,7 @@ function code_from_ast(linf,tenv,sig)
     c
 end
 
-const _staged_cache = Dict{Any,Any}()
-
-function code(f::Function,argtypes::ANY)
-    meths = []
-    try
-        meths = Base._methods(f,argtypes, -1)
-    catch
-        println("Tryed ", f, " ", argtypes)
-        rethrow()
-    end
-    if meths === false || length(meths) > 1
-        return length(meths)
-    end
-    if length(meths) == 0
-        return false
-    end
-    meth = meths[1][3]
-    func = meth.func
-    tenv = meths[1][2]
-    if meth.isstaged
-        key = (meth, argtypes, tenv)
-        if !haskey(_staged_cache, key)
-            try
-                func = ccall(:jl_instantiate_staged, Any,(Any,Any,Any), meth, Tuple{argtypes...}, tenv)
-            catch
-                func = false
-            end
-            _staged_cache[key] = func
-        else
-            func = _staged_cache[key]
-        end
-    end
-    func !== false || return false
-    c = code_from_ast(func.code, tenv, meth.sig)
-    c
-end
+const _staged_cache = ObjectIdDict()#Dict{Any,Any}()
 
 function displayfun(s::Scheduler, fc::Int)
     b = IOBuffer()
@@ -1827,9 +1804,9 @@ export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,FunState,Exp
 
 module Analysis
 using GreenFairy
-const ValueT = Prod{Tuple{Const,Ty,Kind,Sign,Birth,ConstCode{Ty}}}
+const ValueT = Prod{Tuple{Const,AliasOf,Ty,Kind,Sign,Birth,ConstCode{Ty}}}
 const FinalT = FinalState{ValueT}
-make_sched(conf) = Scheduler(ExprState(ValueT),State(ValueT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
+make_sched(conf) = Scheduler{ValueT,State{ValueT,FinalT}}(State(ValueT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
 end
 
 immutable Stats
