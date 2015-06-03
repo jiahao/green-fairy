@@ -96,6 +96,14 @@ Const(v::ANY) = Const(L3e, v)
 top(::Type{Const}) = Const(top(L3), ())
 bot(::Type{Const}) = Const(bot(L3), ())
 ==(x::Const,y::Const) = x.tag == y.tag && (x.tag != L3e || x.v === y.v)
+function meet(x::Const,y::Const)
+    isbot(x) && return x
+    isbot(y) && return y
+    istop(x) && return y
+    istop(y) && return x
+    x == y && return x
+    return bot(Const)
+end
 
 immutable ConstCode{EnvT} <: TagLattice
     tag :: L3
@@ -1798,13 +1806,13 @@ function displayfun(s::Scheduler, fc::Int)
     display("text/html", readall(b))
 end
 
-export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind
+export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,FunState,ExprVal,ExprState,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice
 
 # == client
 
 module Analysis
 using GreenFairy
-const ValueT = Prod{Tuple{Const,AliasOf,Ty,Kind,Sign,Birth,ConstCode{Ty}}}
+const ValueT = Prod{Tuple{Const,Ty,Kind,Sign,Birth,ConstCode{Ty}}}
 const FinalT = FinalState{ValueT}
 make_sched(conf) = Scheduler{ValueT,State{ValueT,FinalT}}(State(ValueT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
 end
