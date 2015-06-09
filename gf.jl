@@ -56,7 +56,10 @@ type Code
     decl_types :: Dict{LocalName,Any}
 end
 
+include("dom.jl")
+
 import Base.convert
+using Base.Collections
 # ========== Lattice stuff
 abstract Lattice
 istop{L<:Lattice}(x::L) = x === top(L)
@@ -240,7 +243,7 @@ immutable AliasOf <: TagLattice
     sa :: Int
     fn :: Symbol
     AliasOf(tag::L3) = new(tag)
-    AliasOf(tag::L3,sa::Int,fn::Symbol) = nw(tag,sa,fn)
+    AliasOf(tag::L3,sa::Int,fn::Symbol) = new(tag,sa,fn)
 end
 
 top(::Type{AliasOf}) = AliasOf(top(L3))
@@ -252,16 +255,23 @@ function join(x::AliasOf, y::AliasOf)
     (istop(x) || istop(y)) && return top(AliasOf)
     isbot(x) && return y
     isbot(y) && return x
-    x.sa == y.sa && return x
+    if x.sa == y.sa
+        if x.fn === y.fn
+            return x
+        else
+            return AliasOf(x.sa, symbol("*"))
+        end
+    end
     top(AliasOf)
 end
 function meet(x::AliasOf,y::AliasOf)
     (isbot(x) || isbot(y)) && return bot(AliasOf)
     istop(x) && return y
     istop(y) && return x
-    x.sa == y.sa && return x
-    bot(AliasOf)
+    return x
 end
+
+Base.show(io::IO, x::AliasOf) = (istop(x) || isbot(x)) ? show(io, x.tag) : print(io, "alias(", x.sa, ".", x.fn, ")")
 
 
 # ========== Reduced product
@@ -485,20 +495,23 @@ function Base.setindex!{T}(s::StateCell{T},v::T,pc::Int)
     end
     s
 end
+
 @inline function propagate!{T}(s::StateCell{T},pc::Int,next::Int)
     pc > 0 || return false
-    next != pc+1 || s.val_isset[next] || return false
-    s_pc = s[pc]
-    s_next = s[next]
-    if s_pc <= s_next
-        false
-    else
-        val = isbot(s_next) ? s_pc : join(s_next,s_pc)
-        if !(val <= s_next)
-            s[next] = val
-            true
-        else
+    @inbounds begin
+        next != pc+1 || s.val_isset[next] || return false
+        s_pc = s[pc]
+        s_next = s[next]
+        return if s_pc <= s_next
             false
+        else
+            val = isbot(s_next) ? s_pc : join(s_next,s_pc)
+            if !(val <= s_next)
+                s[next] = val
+                true
+            else
+                false
+            end
         end
     end
 end
@@ -522,15 +535,16 @@ end
 
 include("mprod.jl")
 
-type LocalStore{C}
-    locals :: Dict{LocalName,C}
-    sa :: Vector{C}
+type LocalStore{C<:MCell,V<:Lattice}
+    local_names :: Vector{LocalName}
+    locals :: Vector{C}
+    sa :: Vector{V}
     len :: Int
 end
 function Base.getindex(s::LocalStore, pc)
-    [ k => v[pc] for (k,v) in  s.locals ]
+    [ k => v[pc] for (k,v) in  zip(s.local_names,s.locals) ]
 end
-LocalStore{C}(::Type{C}, n::Int) = LocalStore(Dict{LocalName,C}(), [C(n) for i=1:n+1], n)
+LocalStore{C}(::Type{C}, n::Int) = LocalStore(Array(LocalName,0),Array(C,0), [bot(eltype(C)) for i=1:n+1], n)
 type Thread
     fc :: Int
     pc :: Int
@@ -546,8 +560,9 @@ end
 type StateDiff{V,TV}
     t::Thread
     locals :: Vector{LocalStateDiff{V}}
-    sa :: Vector{Tuple{Int,V}}
-    lost :: Vector{Birth}
+    sa_name :: Int
+    sa_val :: V
+    lost :: Vector{Int}
     value :: V
     thrown :: TV
     must_throw :: Bool
@@ -557,59 +572,67 @@ end
 function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
     d = sd.locals
     for lsd in d
-        if !haskey(s.locals, lsd.name)
-            s.locals[lsd.name] = C(s.len)
+        if !(lsd.name in s.local_names)
+            push!(s.locals, C(s.len))
+            push!(s.local_names, lsd.name)
         end
     end
     chgd = false
-    for (k,v) in s.locals
+    for li = 1:length(s.locals)
+        k = s.local_names[li]
+        v = s.locals[li]
         idx = 0
         for j=1:length(d)
             if d[j].name === k
                 idx = j
             end
         end
+        
         if idx > 0
             chgd |= propagate!(v,pc,next,d[idx].val)
         else
             chgd |= propagate!(v,pc,next)
         end
     end
-    d = sd.sa
-    for i=1:s.len+1
-        idx = 0
-        for j = 1:length(d)
-            if d[j][1] == i
-                idx = j
-            end
+    sa = sd.sa_name
+    if sa > 0
+        val = s.sa[sa]
+        if !(sd.sa_val <= val)
+            s.sa[sa] = join(sd.sa_val, val)
+            chgd = true
         end
-        if idx > 0
-            chgd |= propagate!(s.sa[i], pc, next, d[idx][2])
+    end
+    #=for i=1:s.len+1
+        if i == sd.sa_name
+            chgd |= propagate!(s.sa[i], pc, next, sd.sa_val)
         else
             chgd |= propagate!(s.sa[i], pc, next)
         end
-    end
+    end=#
     chgd
 end
 function eval_local{C}(s::LocalStore{C}, pc::Int, name::LocalName)
-    if !haskey(s.locals, name)
+    idx = findfirst(s.local_names, name)
+    if idx == 0
         bot(eltype(C))
     else
-        s.locals[name][pc]
+        s.locals[idx][pc]
     end
 end
 
-function eval_local{C}(s::LocalStore{C}, pc::Int, name::Int)
-    s.sa[name][pc]
+function eval_local(s::LocalStore, pc::Int, name::Int)
+    s.sa[name]
 end
 
 function same_state{V}(s::LocalStore, pc::Int, d::Vector{LocalStateDiff{V}})
     for lsd in d
-        if !haskey(s.locals, lsd.name)
+        if !(lsd.name in s.local_names)
             return false
         end
     end
-    for (k,v) in s.locals
+    for li = 1:length(s.locals)
+        k = s.local_names[li]
+        v = s.locals[li]
         idx = 0
         for j=1:length(d)
             if d[j].name === k
@@ -628,19 +651,19 @@ function same_state{V}(s::LocalStore, pc::Int, d::Vector{LocalStateDiff{V}})
     end
     true
 end
-immutable State{LV,FinalT}
-    funs :: Vector{LocalStore{LV}} # TODO better name
+immutable State{LV,C,FinalT}
+    funs :: Vector{LocalStore{C,LV}} # TODO better name
     finals :: Vector{FinalT}
-    lost :: Vector{Set{Birth}}
+    lost :: Vector{Set{Int}}
 end
-State{V,FinalT}(::Type{V},::Type{FinalT}) = State(Array(LocalStore{V}, 0), Array(FinalT,0), Array(Set{Birth}, 0))
-function ensure_filled!{V,F}(s::State{V,F}, fc::Int, code::Code)
-    push!(s.funs, LocalStore(V, length(code.body)))
+State{V,C,FinalT}(::Type{V},::Type{C},::Type{FinalT}) = State{V,C,FinalT}(Array(LocalStore{C,V}, 0), Array(FinalT,0), Array(Set{Int}, 0))
+function ensure_filled!{V,C,F}(s::State{V,C,F}, fc::Int, code::Code)
+    push!(s.funs, LocalStore(C, length(code.body)))
     push!(s.finals, bot(F))
-    push!(s.lost, Set{Birth}())
+    push!(s.lost, Set{Int}())
 end
 eval_local(s::State, fc::Int, pc::Int, name) = eval_local(s.funs[fc], pc, name)
-function propagate!(s::State,fc::Int,pc::Int,next::Int,sd)
+function propagate!{V,LV}(s::State,fc::Int,pc::Int,next::Int,sd::StateDiff{V,LV})
     chgd = false
     
     l = length(s.lost[fc])
@@ -733,7 +756,7 @@ function fork(s::Scheduler,t::Thread,pc::Int)
     child = Thread(t.fc,pc)
     child.eh_stack = copy(t.eh_stack)
     child.cycle = t.cycle
-    push!(s.threads, child)
+    heappush!(s.threads, child)
     child
 end
 
@@ -905,7 +928,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
     fc = 0
     for fc2 in 1:length(sched.funs)
         if sched.funs[fc2] === fcode
-            @assert isempty(sd.sa)
+            @assert sd.sa_name == -1
             if same_state(sched.states, fc2, 1, sd.locals)
                 fc = fc2
                 break
@@ -919,7 +942,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
     
     child.fc = fc
     propagate!(sched.states, fc, 0, 1, sd)
-    push!(sched.threads, child)
+    heappush!(sched.threads, child)
 
     push!(t.wait_on, fc)
     t.fc > 0 && push!(sched.called_by[fc], (t.fc,t.pc))
@@ -928,7 +951,6 @@ end
 
 function eval_call!{V,S}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::Int, args::Tuple{Vararg{Int}})
     n = length(args)
-    #args = map(i -> eval_local(sched.states,t.fc,t.pc,i), code.call_args[t.pc])
     stack = Array(V, n)
     for i=1:n
         stack[i] = eval_local(sched.states,t.fc,t.pc,args[i])
@@ -1331,6 +1353,7 @@ function eval_assign!{V}(sched,sd,code,name,res::V)
     else
         # TODO unknown effects
     end
+    nothing
 end
 
 function eval_sym{V}(sched::Scheduler{V},t,sd,code,e)
@@ -1343,9 +1366,9 @@ function eval_sym{V}(sched::Scheduler{V},t,sd,code,e)
         top(V) # global
     end
 end
-StateDiff(t,LV,TV) = StateDiff(t,Array(LocalStateDiff{LV},0), Array(Tuple{Int,LV},0), Array(Birth,0), bot(LV), bot(TV), false)
-function Base.copy(sd::StateDiff)
-    StateDiff(sd.t, copy(sd.locals), copy(sd.sa), copy(sd.lost), sd.value, sd.thrown, sd.must_throw)
+StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, bot(LV), Array(Int,0), bot(LV), bot(TV), false)
+function Base.copy{V,TV}(sd::StateDiff{V,TV})
+    StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, sd.sa_val, copy(sd.lost), sd.value, sd.thrown, sd.must_throw)
 end
 
 function may_throw!(sd :: StateDiff, v)
@@ -1454,8 +1477,9 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     if !isempty(t.wait_on)
         return
     end
-    push!(sd.sa, (t.pc, res))
-    sd.value = res
+    sd.sa_name = t.pc
+    sd.sa_val = res
+    sd.value = res # TODO remove this
     
     TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", res))
     
@@ -1487,7 +1511,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
 
     if next_pc != branch_pc
         branch_chgd = propagate!(sched.states, t.fc, t.pc, branch_pc, branch_sd)
-        if branch_chgd && branch_pc <= length(code.body)
+        if (chgd || branch_chgd) && branch_pc <= length(code.body)
             ft = fork(sched, t, branch_pc)
         end
     end
@@ -1524,12 +1548,12 @@ function step!(s::Scheduler)
         end
         n -= 1
     end=#
-    sort!(s.threads)
+    #sort!(s.threads)
 #=    if n == 0
         n = length(s.threads)
     end=#
     n = 1
-    t = s.threads[n]
+    t = heappop!(s.threads)
     k = 0
     try
         step!(s, t, s.config)
@@ -1544,9 +1568,16 @@ function step!(s::Scheduler)
         fc = t.fc
         t.pc = length(s.funs[fc].body) + 1
         #join!(s.final, fc, t.final)
-        deleteat!(s.threads,n)
+        #deleteat!(s.threads,n)
         push!(s.done_threads,t)
-        same_func = find(th->th.fc==fc, s.threads)
+        
+        same_func = Array(Int,0)
+        for i in 1:length(s.threads)
+            if s.threads[i].fc == fc
+                push!(same_func, i)
+            end
+        end
+        
         isdone = isempty(same_func)
         mincycle = isdone ? -1 : minimum([s.threads[i].cycle for i in same_func])
         #println("Thread finished at ", s.funs[fc], " : ", t.cycle, " min ", mincycle)
@@ -1565,9 +1596,12 @@ function step!(s::Scheduler)
                 exit()
             end
             deleteat!(s.threads, same_func)
+            heapify!(s.threads)
             s.done[t.fc] = true
         end
         GTRACE && println("THREAD FINISHED ", s.funs[t.fc], " : ", s.states.finals[t.fc],  "================")
+    else
+        heappush!(s.threads, t)
     end
 end
 LIM = 500000
@@ -1670,7 +1704,7 @@ function eval_typ_in(ty, tenv)
         ty
     end
 end
-
+const HIT = [0,0,0]
 const _code_cache = ObjectIdDict()#Dict{Any,Code}()
 const SR = []
 function code_from_ast(linf,tenv,sig::ANY)
@@ -1694,16 +1728,6 @@ function code_from_ast(linf,tenv,sig::ANY)
         println(i, ") ", b, " -- ", apc)
     end=#
     
-    label_pc = Array(Int, 0)
-    for pc = 1:length(body)
-        if isa(body[pc], LabelNode)
-            lnum = body[pc].label+1
-            if lnum > length(label_pc)
-                resize!(label_pc, lnum)
-            end
-            label_pc[lnum] = pc
-        end
-    end
     # TODO ask Jeff if this is the easiest way to sort out this mess
     # probably not
     locs = Set{LocalName}(ast.args[2][1])
@@ -1749,6 +1773,38 @@ function code_from_ast(linf,tenv,sig::ANY)
     end
     union!(locs,capt)
     push!(locs, :the_exception) #TODO ugh
+
+    label_pc = Array(Int, 0)
+    gensy = Set{Int}()
+    notsa = Set{Symbol}()
+    sa = Set{Symbol}()
+    for pc = 1:length(body)
+        if isa(body[pc], LabelNode)
+            lnum = body[pc].label+1
+            if lnum > length(label_pc)
+                resize!(label_pc, lnum)
+            end
+            label_pc[lnum] = pc
+        end
+        if isa(body[pc],GenSym)
+            push!(gensy,body[pc].id)
+        end
+        if isa(body[pc],Expr) && body[pc].head === :(=)
+            v = body[pc].args[1]
+            if v in locs && !(v in notsa)
+                if v in sa
+                    delete!(sa,v)
+                    push!(notsa,v)
+                else
+                    push!(sa,v)
+                end
+            end
+        end
+    end
+    
+    HIT[1] += length(gensy)
+    HIT[2] += length(locs)
+    HIT[3] += length(sa)
     c = Code(mod, fun_name, body, args_pc, label_pc, locs, args, isva, tenv, capt, decltypes)
     for i=1:2:length(tenv)
         push!(c.locals, tenv[i].name)
@@ -1774,7 +1830,7 @@ function displayfun(s::Scheduler, fc::Int)
     display("text/html", readall(b))
 end
 
-export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,ExprVal,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice
+export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,ExprVal,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice, AliasOf
 
 # == client
 
@@ -1784,7 +1840,7 @@ const ValueTup = (Const,Ty,Kind,Sign,Birth,ConstCode{Ty})
 const ValueT = Prod{Tuple{ValueTup...}}
 const (MValueT,CellT) = GreenFairy.make_mprod(ValueTup)
 const FinalT = FinalState{ValueT}
-make_sched(conf) = Scheduler{ValueT,State{CellT,FinalT}}(State(CellT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
+make_sched(conf) = Scheduler{ValueT,State{ValueT,CellT,FinalT}}(State(ValueT,CellT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
 end
 
 immutable Stats
@@ -1800,7 +1856,7 @@ function Base.show(io::IO, s::Stats)
     @printf("Analysis completed in %.2f s\n", dt)
     @printf("\t%d max concurrent threads\n", maxthr)
     if niter >= 1000
-        @printf("\t%.2f iterations\n", niter/1000)
+        @printf("\t%.2f K iterations\n", niter/1000)
     else
         @printf("\t%d iterations\n", niter)
     end
