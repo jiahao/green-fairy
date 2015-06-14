@@ -1,30 +1,32 @@
 include("gf.jl")
-
+module M
 using GreenFairy
 using Color
 function test(code, dtree, N)
-    ds = GreenFairy.DefStore()
-    add_def!(code, dtree, ds, 0)
-    for i=1:N
-        a = rand(1:length(code.body))
+    ds = GreenFairy.DefStore(Int)
+    add_def!(code, dtree, ds, 1, 0)
+    for a in N
         @show find_label(code, a)
-        add_def!(code, dtree, ds, a)
+        add_def!(code, dtree, ds, a, a)
     end
+    @show ds
     m = Dict{Int,Tuple{Int,Int}}()
     colors = map(hex, distinguishable_colors(ds.ndefs+1))
     colid = 2
     colnum = Dict{Tuple{Int,Int},String}()
     for i=1:length(code.body)
         ll = find_label(code,i)
-        (ll == 0 || dtree.idom[ll][1] == -1) && continue
-        fdef = find_def_fast(code, dtree, ds, i)
-        m[i] = fdef
-        if !haskey(colnum, fdef)
-            colnum[fdef] = colors[colid]
-            colid += 1
+        #(ll == 0 || dtree.idom[ll][1] == -1) && continue
+        try
+            fdef = find_def_fast(code, dtree, ds, i)
+            m[i] = fdef
+            if !haskey(colnum, fdef)
+                #colnum[fdef] = colors[colid]
+                colid += 1
+            end
         end
     end
-    ds, [ i => haskey(colnum, m[i]) ? colnum[m[i]] : "000000" for i=keys(m) ]
+    ds, [ i => haskey(colnum, m[i]) ? colnum[m[i]] : "FFFFFF" for i=keys(m) ]
 end
 
 function rndp(dtree)
@@ -53,24 +55,23 @@ function to_dot(io, code, dtree,colors = Dict{Int,String}())
         println(io, "\"n$i\" [")
 #        i > 0 && haskey(colors, code.label_pc[i]) && println(io, "color = \"#$(colors[code.label_pc[i]])\"")
         println(io, "label = <<table border=\"0\" cellspacing=\"0\">")
-        j0 = i == 0 ? 1 : code.label_pc[i]
-        j = j0
+        j = i == 0 ? 1 : code.label_pc[i]
         println(io, "<tr><td port=\"r\" border=\"1\">", i, "</td></tr>")
         j += 1
         stopnext = false
         while j <= length(code.body)
             e = code.body[j]
-            if count(t -> t[2]+j0 == j, dtree.succ[i+1]) > 0
-                c = haskey(colors,j) ? colors[j] : "000000"
+#            if count(t -> t[2]+j0 == j, dtree.succ[i+1]) > 0
+                c = haskey(colors,j) ? colors[j] : "FFFFFF"
                 print(io, "<tr><td port=\"f$j\" border=\"1\" bgcolor=\"#$c\">")
-                print(io, "[", j-j0, "]")
+                print(io, j)
                 if isa(e,Expr) && e.head === :gotoifnot
                     print(io, "?")
                 elseif isa(e,GotoNode)
                     print(io, "!")
                 end
                 print(io, "</td></tr>")
-            end
+#            end
             j += 1
             stopnext && break
             (j in code.label_pc) && (stopnext = true)
@@ -80,12 +81,11 @@ function to_dot(io, code, dtree,colors = Dict{Int,String}())
         println(io, "];")
     end
     for i=0:N
-        rpc = i == 0 ? 1 : code.label_pc[i]
         for (s,o) in dtree.succ[i+1]
-            println(io, "\"n$i\":f$(rpc+o) -> \"n$s\":r;")
+            println(io, "\"n$i\":f$o -> \"n$s\":r;")
         end
     end
-    for i=1:N
+    #=for i=1:N
         d,o = dtree.idom[i]
         dest = o == 0 ? "r" : string("f", (d == 0 ? 1 : code.label_pc[d])+o)
         println(io, "\"n$i\":r -> \"n$d\":$dest [ color = \"red\" style = \"dashed\" arrowType=\"empty\" ];")
@@ -96,11 +96,11 @@ function to_dot(io, code, dtree,colors = Dict{Int,String}())
             dest = o == 0 ? "r" : string("f", (i == 0 ? 1 : code.label_pc[i])+o)
             #println(io, "\"n$i\":$dest -> \"n$k\":r [ color = \"green\" ];")
         end
-    end
+    end=#
     println(io, "}")
 end
 
-function test_dt(F, A, N=10)
+function test_dt(F, A, N=[])
     code = GreenFairy.code_for_method(Base._methods(F, A, -1)[1], A)
     dtree = @show (GreenFairy.build_dom_tree(code.v))
     #@show build_dfs(code.v)
@@ -137,4 +137,5 @@ function allfuns(m,dm = Set{Any}())
         end
     end
     nlabel,fs
+end
 end

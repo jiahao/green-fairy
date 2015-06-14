@@ -42,6 +42,7 @@ show_limit(x; kw...) = show_limit(STDOUT, x; kw...)
 
 typealias LocalName Union(Symbol,GenSym)
 # static data about a function
+include("dom.jl")
 type Code
     mod :: Module
     name :: Symbol
@@ -54,9 +55,9 @@ type Code
     tvar_mapping
     capt :: Vector{Symbol}
     decl_types :: Dict{LocalName,Any}
+    dtree :: DomTree
+    Code(m,n,b,c,l,lo,a,va,tv,cp,d) = new(m,n,b,c,l,lo,a,va,tv,cp,d)
 end
-
-include("dom.jl")
 
 import Base.convert
 using Base.Collections
@@ -538,13 +539,20 @@ include("mprod.jl")
 type LocalStore{C<:MCell,V<:Lattice}
     local_names :: Vector{LocalName}
     locals :: Vector{C}
+    defs :: Vector{DefStore{V}}
     sa :: Vector{V}
     len :: Int
+    code :: Code
+
+    changed :: BitVector
 end
 function Base.getindex(s::LocalStore, pc)
     [ k => v[pc] for (k,v) in  zip(s.local_names,s.locals) ]
 end
-LocalStore{C}(::Type{C}, n::Int) = LocalStore(Array(LocalName,0),Array(C,0), [bot(eltype(C)) for i=1:n+1], n)
+function LocalStore{C}(::Type{C}, code::Code)
+    n = length(code.body)
+    LocalStore(Array(LocalName,0),Array(C,0),Array(DefStore{eltype(C)},0),[bot(eltype(C)) for i=1:n+1], n, code, trues(n+1))
+end
 type Thread
     fc :: Int
     pc :: Int
@@ -556,6 +564,7 @@ Thread(f,p) = Thread(f,p,Array(Int,0),0,Array(Int,0))
 immutable LocalStateDiff{V}
     name :: LocalName
     val :: V
+    saval :: Int
 end
 type StateDiff{V,TV}
     t::Thread
@@ -575,9 +584,17 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
         if !(lsd.name in s.local_names)
             push!(s.locals, C(s.len))
             push!(s.local_names, lsd.name)
+            ds = DefStore(eltype(C))
+            add_def!(s.code, s.code.dtree, ds, 0, bot(eltype(C)))
+            push!(s.defs, ds)
         end
     end
     chgd = false
+    chgd2 = false
+    lbl = -1
+    if next-1 in s.code.label_pc
+        lbl = find_label(s.code,next)
+    end
     for li = 1:length(s.locals)
         k = s.local_names[li]
         v = s.locals[li]
@@ -587,9 +604,18 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
                 idx = j
             end
         end
-        
+
+        if lbl >= 0 && haskey(s.defs[li].phis, lbl)
+            newval = reduce(join, map(i->get(s.defs[li].vals,i,bot(eltype(C))),s.defs[li].phis[lbl]))
+            if haskey(s.defs[li].vals, next) && newval <= s.defs[li].vals[next]
+            else
+                s.defs[li].vals[next] = newval
+                chgd2 = true
+            end
+        end
         if idx > 0
             chgd |= propagate!(v,pc,next,d[idx].val)
+            chgd2 |= add_def!(s.code, s.code.dtree, s.defs[li], next, d[idx].val)
         else
             chgd |= propagate!(v,pc,next)
         end
@@ -599,7 +625,7 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
         val = s.sa[sa]
         if !(sd.sa_val <= val)
             s.sa[sa] = join(sd.sa_val, val)
-            chgd = true
+            chgd = chgd2 = true
         end
     end
     #=for i=1:s.len+1
@@ -609,14 +635,50 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
             chgd |= propagate!(s.sa[i], pc, next)
         end
     end=#
-    chgd
+    if chgd2
+        fill!(s.changed, true)
+    else
+        pc > 0 && (s.changed[pc] = false)
+    end
+    s.changed[next]
 end
 function eval_local{C}(s::LocalStore{C}, pc::Int, name::LocalName)
     idx = findfirst(s.local_names, name)
     if idx == 0
         bot(eltype(C))
     else
-        s.locals[idx][pc]
+        locval = s.locals[idx][pc]
+        def = nothing
+        val = nothing
+        try
+            def = find_def_fast(s.code, s.code.dtree, s.defs[idx], pc)
+            val = #=if (def[2]-1 in s.code.label_pc)
+                s.defs[idx].phis[find_label(s.code, def[2])]
+            else=#
+            s.defs[idx].vals[def[2]]
+            #end
+            #@show vals
+            #if all(vals .> 0)
+            #    ssaval = reduce(join,map(i->s.sa[i],vals))
+            if val == locval
+            else
+                @show pc s.code.label_pc
+                    @show s.defs[idx] def
+                    @show s.defs[idx].vals
+                @show val locval
+                @show s.code.dtree.front
+                #error()
+                end
+            #end
+
+            
+        catch
+            println("Error while evaling $name")
+            @show s.defs[idx] def locval s.defs[idx].vals
+            @show collect(enumerate(s.code.label_pc))
+            rethrow()
+        end
+        val
     end
 end
 
@@ -658,7 +720,7 @@ immutable State{LV,C,FinalT}
 end
 State{V,C,FinalT}(::Type{V},::Type{C},::Type{FinalT}) = State{V,C,FinalT}(Array(LocalStore{C,V}, 0), Array(FinalT,0), Array(Set{Int}, 0))
 function ensure_filled!{V,C,F}(s::State{V,C,F}, fc::Int, code::Code)
-    push!(s.funs, LocalStore(C, length(code.body)))
+    push!(s.funs, LocalStore(C, code))
     push!(s.finals, bot(F))
     push!(s.lost, Set{Int}())
 end
@@ -809,17 +871,20 @@ end
 
 function to_signature(args)
     map(args) do a
-        ca = convert(Kind,a)
-        if !istop(ca)
-            ub = ca.ub.ty
-            if isleaftype(ub)
+        ca = convert(Const,a)
+        if !istop(ca) && isa(ca.v,Type)
+            return Type{ca.v}
+        end
+        ka = convert(Kind,a)
+        if !istop(ka)
+            ub = ka.ub.ty
+            return if isleaftype(ub)
                 Type{ub}
             else
                 Type{TypeVar(:_,ub)}
             end
-        else
-            convert(Ty,a).ty
         end
+        convert(Ty,a).ty
     end
 end
 
@@ -903,12 +968,12 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
                 arg = meet(arg, convert(V,Ty(declty)))
             end
         end
-        eval_assign!(sched, sd, fcode, argname, arg)
+        eval_assign!(sched, sd, fcode, argname, arg, -1)
     end
     if fcode.isva
         tup = eval_call_values!(sched, child, sd, convert(V,Const(Base.tuple)), vargs)
         @assert tup !== nothing
-        eval_assign!(sched, sd, fcode, fcode.args[end], tup)
+        eval_assign!(sched, sd, fcode, fcode.args[end], tup, -1)
     end
     for i=1:2:length(fcode.tvar_mapping)
         tv = fcode.tvar_mapping[i]
@@ -918,11 +983,11 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         else
             convert(V,Const(tval))
         end
-        eval_assign!(sched, sd, fcode, tv.name, aval)
+        eval_assign!(sched, sd, fcode, tv.name, aval, -1)
     end
     length(env) == length(fcode.capt) || DEBUGWARN && warn(@sprintf("Wrong env size %d vs %d : %s vs %s", length(env), length(fcode.capt), env, fcode.capt))
     for i=1:length(fcode.capt)
-        eval_assign!(sched, sd, fcode, fcode.capt[i], i > length(env) ? top(V) : convert(V,env[i]))
+        eval_assign!(sched, sd, fcode, fcode.capt[i], i > length(env) ? top(V) : convert(V,env[i]), -1)
     end
     
     fc = 0
@@ -1004,7 +1069,7 @@ function eval_call_values!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff,
         end
 
         argtypes = to_signature(args)
-        meths = Base._methods(f,argtypes,1)
+        meths = Base._methods(f,argtypes,4)
         if meths !== false
             for meth in meths
                 cc = code_for_method(meth, argtypes)
@@ -1347,9 +1412,9 @@ function eval_call_values!{V,EV}(sched::Scheduler, t::Thread, sd::StateDiff, ::T
     top(V)
 end
 
-function eval_assign!{V}(sched,sd,code,name,res::V)
+function eval_assign!{V}(sched,sd,code,name,res::V,saval::Int)
     if name in code.locals || isa(name,GenSym)
-        push!(sd.locals, LocalStateDiff(name, res))
+        push!(sd.locals, LocalStateDiff(name, res, saval))
     else
         # TODO unknown effects
     end
@@ -1451,7 +1516,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     elseif isa(e,Expr) && e.head === :(=)
         @assert next_pc == branch_pc
         val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
-        eval_assign!(sched, sd, code, e.args[1]::LocalName, val)
+        eval_assign!(sched, sd, code, e.args[1]::LocalName, val, code.call_args[t.pc][1])
         val
     elseif isa(e,Expr) && e.head == :enter
         push!(t.eh_stack, code.label_pc[e.args[1]::Int+1])
@@ -1490,7 +1555,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     
     if could_throw
         @assert next_pc == branch_pc == t.pc+1 # branching cannot throw
-        exc_sd = LocalStateDiff(:the_exception, convert(V,sd.thrown))
+        exc_sd = LocalStateDiff(:the_exception, convert(V,sd.thrown), -1)
         handler = isempty(t.eh_stack) ? length(code.body)+1 : t.eh_stack[end]
         branch_pc = handler
         if must_throw
@@ -1501,6 +1566,12 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             branch_sd = copy(sd)
             branch_sd.value = bot(V)
             push!(branch_sd.locals, exc_sd)
+        end
+        if handler in code.label_pc
+            println("lets go $handler")
+            add_edge!(code, code.dtree, t.pc, findfirst(code.label_pc, handler))
+        elseif handler != length(code.body)+1
+            error("????")
         end
     end
     #=if !must_throw
@@ -1558,9 +1629,9 @@ function step!(s::Scheduler)
     try
         step!(s, t, s.config)
     catch x
-        println("Exception while executing ", t)
+        println("Exception while executing ", t, " :")
+        println(x)
         println("Function : ", s.funs[t.fc])
-        read(STDIN, Char)
         #println(s)
         rethrow(x)
     end
@@ -1805,7 +1876,9 @@ function code_from_ast(linf,tenv,sig::ANY)
     HIT[1] += length(gensy)
     HIT[2] += length(locs)
     HIT[3] += length(sa)
+
     c = Code(mod, fun_name, body, args_pc, label_pc, locs, args, isva, tenv, capt, decltypes)
+    c.dtree = build_dom_tree(c)
     for i=1:2:length(tenv)
         push!(c.locals, tenv[i].name)
     end
@@ -1872,6 +1945,7 @@ function run(f::Function, args)
             convert(Analysis.ValueT, a)
         end
     end
+    empty!(_code_cache)
     t = Thread(0,0)
     eval_call_values!(sched, t, StateDiff(t,Analysis.ValueT,Ty), convert(Analysis.ValueT,Const(f)), Analysis.ValueT[args...])
     dt = @elapsed begin

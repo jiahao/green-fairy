@@ -1,31 +1,28 @@
 function dfs!(code, label, order, n, pred, succ)
     rpc = label == 0 ? 1 : code.label_pc[label]
-    order[label+1] == typemax(Int) || return n
+    order[label+1] == 0 || return n
+    order[label+1] = -1
     pc = rpc+1
     body = code.body
-    @show code
     N = length(body)
-    n += 1
-    order[label+1] = n
     while pc <= N
         e = body[pc]
-        @show e
         o = pc-rpc
         if isa(e, GotoNode)
             l = (e::GotoNode).label+1
-            push!(pred[l], (label,o))
-            push!(succ[label+1], (l,o))
+            push!(pred[l], (label,pc))
+            push!(succ[label+1], (l,pc))
             n = dfs!(code, l, order, n, pred, succ)
             break
         elseif isa(e,Expr) && (e::Expr).head === :gotoifnot
             l = (e::Expr).args[2]::Int + 1
-            push!(pred[l], (label,o))
-            push!(succ[label+1], (l,o))
+            push!(pred[l], (label,pc))
+            push!(succ[label+1], (l,pc))
             n = dfs!(code, l, order, n, pred, succ)
         elseif isa(e,LabelNode)
             l = (e::LabelNode).label+1
-            push!(pred[l], (label,o))
-            push!(succ[label+1], (l,o))
+            push!(pred[l], (label,pc))
+            push!(succ[label+1], (l,pc))
             n = dfs!(code, l, order, n, pred, succ)
             break
         elseif isa(e, Expr) && (e::Expr).head === :return
@@ -33,15 +30,28 @@ function dfs!(code, label, order, n, pred, succ)
         end
         pc += 1
     end
+    n += 1
+    order[label+1] = n
     n
 end
 
 function build_dfs(code)
     N = length(code.label_pc)
-    order = fill(typemax(Int), N+1)
-    pred = [Array(Tuple{Int,Int},0) for _ = 1:N]
-    succ = [Array(Tuple{Int,Int},0) for _ = 1:N+1]
-    dfs!(code, 0, order, 0, pred, succ)
+    order = zeros(Int, N+1)
+    pred = Vector{Tuple{Int,Int}}[Array(Tuple{Int,Int},0) for _ = 1:N]
+    succ = Vector{Tuple{Int,Int}}[Array(Tuple{Int,Int},0) for _ = 1:N+1]
+    n = dfs!(code, 0, order, 0, pred, succ)
+    order[find(order)] += length(order) - n # ensure root is the first component
+    n = 0
+    while true
+        i = findfirst(order, 0)
+        i == 0 && break
+        n = dfs!(code, i-1, order, n, pred, succ) 
+    end
+    @assert isperm(order)
+    m = maximum(order)
+    @assert m > 0
+    order = (1+m) .- order # reverse post order
     order, pred, succ
 end
 
@@ -60,38 +70,84 @@ end
 
 type DomTree
     idom :: Vector{Tuple{Int,Int}} # label => immediate dominator
-    pred :: Vector{Vector{Tuple{Int,Int}}} # label => (pred label, offset), ...
-    succ :: Vector{Vector{Tuple{Int,Int}}} # label+1 => (succ label, offset) ...
+    pred :: Vector{Vector{Tuple{Int,Int}}} # label => (pred label, pc), ...
+    succ :: Vector{Vector{Tuple{Int,Int}}} # label+1 => (succ label, pc) ...
     order :: Vector{Int} # label+1 => rev po index
     order_perm :: Vector{Int} # reverse perm
-    front :: Vector{Dict{Int,Tuple{Int,Int}}} # label => dom frontier
+    front :: Vector{Dict{Int,Tuple{Int,Int}}} # label => dom frontier : [ front_label => front range ]
 end
 
-function build_dom_tree(code)
-    order, pred, succ = build_dfs(code)
-    changed = true
+# if inc != -1 do it incrementally assuming only inc changed
+function build_dom_tree(code, order, pred, succ, inc, idom)
+    any_changed = true
     order_perm = sortperm(order)
     N = length(code.label_pc)
-    idom = fill((-1,0), N)
     @assert order_perm[1] == 1
-    while changed
-        changed = false
+    changed = Array(Bool, N+1)
+    if inc == -1
+        fill!(changed,true)
+    else
+        println("inc idom :")
+        @show order pred inc idom
+        fill!(changed,false)
+        inc > 0 && (idom[inc] = (-1,0))
+    end
+    eco = tot = 0
+    while any_changed
+        any_changed = false
         for i=2:N+1
             ni = order_perm[i]-1
             
             new_idom = (-1,0)
+            new_idom2 = idom[ni]
             for p in pred[ni]
                 new_idom = inter_idom(new_idom, p, order, idom)
+                tot += 1
+                if changed[p[1]+1] || idom[ni][1] == -1
+                    new_idom2 = inter_idom(new_idom2, p, order, idom)
+                else
+                    eco+=1
+                end
             end
+            @assert(new_idom2 == new_idom, "Idom : $changed $(pred[ni]) $new_idom2 $new_idom")
             if new_idom != idom[ni]
-                changed = true
+                any_changed = true
+                changed[ni+1] = true
+            else
+                changed[ni+1] = false
             end
             idom[ni] = new_idom
         end
     end
+    tot > 0 && println("econom ", 100*(eco/tot), "% = ", eco, "/", tot, " ", N, " nodes ", inc)
     #@assert count(x->x[1] < 0, idom) == 0
-    front = dom_front(idom, pred)
+    front = inc == -1 ? dom_front(idom, pred) : Array(Dict{Int,Vector{Tuple{Int,Int}}},0)
     DomTree(idom, pred, succ, order, order_perm, front)
+end
+
+function build_dom_tree(code)
+    order, pred, succ = build_dfs(code)
+    N = length(pred)
+    build_dom_tree(code, order, pred, succ, -1, fill((-1,0), N))
+end
+
+function add_edge!(code, dtree::DomTree, from::Int, dest::Int)
+    from_lb = find_label(code, from)
+    ((from_lb,from) in dtree.pred[dest]) && return dtree
+    push!(dtree.pred[dest], (from_lb, from))
+    push!(dtree.succ[from_lb+1], (dest, from))
+    order,pred,succ = dtree.order,dtree.pred,dtree.succ
+    @show dtree.idom
+    dtinc = build_dom_tree(code, order, pred, succ, dest, dtree.idom)
+    dtfull = build_dom_tree(code, order, pred, succ, -1, fill((-1,0),length(pred)))
+    println("Add edge $from $dest")
+    @show pred
+    @show dtinc.idom
+    @show dtfull.idom
+    if dtinc.idom != dtfull.idom
+        error("incremental error")
+    end
+    dtfull
 end
 
 function update_front!(d, k, v)
@@ -115,9 +171,12 @@ function dom_front(idom, pred)
             while runner != iid && runner != 0
                 d = domfront[runner+1]
                 update_front!(d, i, (0, ro))
+                
                 runner,ro = idom[runner]
+                runner == -1 && break
             end
-            @assert runner == iid
+            runner == -1 && continue
+            #@assert runner == iid
             ro > iio && update_front!(domfront[runner+1],i,(iio,ro))
         end
     end
@@ -140,64 +199,114 @@ end
 # right before pc
 function df!(code, dtree, pc, df)
     lbl = find_label(code, pc)
-    lbl > 0 || return
-    off = pc - code.label_pc[lbl]
     for (k,(lb,ub)) in dtree.front[lbl+1]
-        (lb < off <= ub) && push!(df, k)
+        (lb < pc <= ub) && push!(df, k)
     end
 end
 
 function iterated_domfront(code, dtree, pc)
-    idf = Set{Int}()
+    idf = Array(Int,0)
     todo = Set{Int}()
     df!(code, dtree, pc, todo)
+    order = dtree.order
     while !isempty(todo)
         lb = pop!(todo)
-        push!(idf, lb)
+        (order[lb] in idf) && continue
+        heappush!(idf, order[lb])
         df!(code, dtree, code.label_pc[lb]+1, todo)
-        setdiff!(todo, idf)
     end
     idf
 end
-type DefStore
-    defs :: Dict{Int,Vector{Int}} # TODO optimize for single def
+type DefStore{T}
+    defs :: Dict{Int,Vector{Int}} # label => pcs
+    phis :: Dict{Int,Vector{Int}} # label => incomings
+    
+    vals :: Dict{Int,T} # pc => val
+    odef :: Vector{Tuple{Int,T}}
     ndefs :: Int
 end
-DefStore() = DefStore(Dict{Int,Vector{Int}}(), 0)
-function add_def!(code, dtree::DomTree, d::DefStore, pc::Int)
+function Base.show(io::IO, ds::DefStore)
+    println(io, "DefStore:")
+    println(io, "\todef : ", ds.odef)
+    for (i,vi) in ds.defs
+        print(io, "\t- $i ")
+        for k in vi
+            print(io, k, ":", ds.vals[k], " ")
+        end
+        println(io)
+    end
+    for (i,vi) in ds.phis
+        print(io, "\t- $i = phi( ")
+        for k in vi
+            print(io, k, " ")
+        end
+        print(io, ")")
+        println(io)
+    end
+end
+DefStore{T}(::Type{T}) = DefStore{T}(Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(), Dict{Int,T}(), Array(Tuple{Int,T},0), 0)
+function add_val!{T}(d::DefStore{T}, l::Int, pc::Int, val::T)
+    if haskey(d.vals, pc)
+        old = d.vals[pc]
+        if val <= old
+            false
+        else
+            d.vals[pc] = join(old,val)
+            true
+        end
+    else
+        d.vals[pc] = val
+        true
+    end
+end
+function add_def!{T}(code, dtree::DomTree, d::DefStore{T}, pc::Int, val::T)
     l = find_label(code, pc)
     def_delta = 0
     defs = d.defs
+    vals = d.vals
+    phis = d.phis
+    push!(d.odef, (pc,val))
+    need_phis = false
     if !haskey(defs, l)
         defs[l] = Int[pc]
         def_delta += 1
+        need_phis = true
     else
         ldef = defs[l]
         if !(pc in ldef)
             push!(ldef, pc)
             def_delta += 1
             sort!(ldef) # TODO ugh
+            need_phis = true
         end
     end
-    for l in iterated_domfront(code, dtree, pc)
+    chgd = add_val!(d, l, pc, val)
+    need_phis || return chgd
+    
+    operm = dtree.order_perm
+    idf = iterated_domfront(code, dtree, pc)
+    while !isempty(idf)
+        lo = heappop!(idf)
+        l = operm[lo]
         lpc = code.label_pc[l]+1
-        if !haskey(defs, l)
-            defs[l] = Int[lpc]
+        if !haskey(phis, l)
+            orig_def = find_def_fast(code, dtree, d, lpc)[2]
+            phis[l] = Int[pc, orig_def]
+            chgd |= add_val!(d, l, lpc, d.vals[orig_def])
             def_delta += 1
         else
-            ldef = defs[l]
-            if ldef[1] != lpc
-                unshift!(ldef, lpc)
-                @assert issorted(ldef)
-                def_delta += 1
-            end
+            push!(phis[l], pc)
+            def_delta += 1
         end
+        chgd |= add_val!(d, l, lpc, val)
     end
     d.ndefs += def_delta
+    chgd
 end
 function find_def_fast(code, dtree, ds, pc)
     l = find_label(code, pc)
     defs = ds.defs
+    phis = ds.phis
     if haskey(defs, l)
         local_defs = defs[l]
         for i = 1:length(local_defs)
@@ -207,9 +316,12 @@ function find_def_fast(code, dtree, ds, pc)
             end
         end
     end
+    if haskey(phis, l)
+        return (l, code.label_pc[l]+1)
+    end
     @assert(l != 0, "use not dominated by a def")
-    id,off = dtree.idom[l]
-    pc = (id == 0 ? 1 : code.label_pc[id]) + off
+    id,pc = dtree.idom[l]
+    @assert(id != -1, "no idom for $l : $(dtree.idom) | $(dtree.pred)")
     return find_def_fast(code, dtree, ds, pc)
 end
 export DefStore,DomTree,find_label,add_def!,find_def_fast

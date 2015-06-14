@@ -27,11 +27,27 @@ function f3(y)
 end
 GreenFairy.test(f3, (Ty(Int),Sign(1))) do r
     @test r.ret_val <= Sign(1)
-#    @test isbot(r.thrown)
 end
 GreenFairy.test(f3, (Ty(Int),Sign(0))) do r
     @test r.ret_val <= Sign(1)
-#    @test isbot(r.thrown)
+end
+function g2()
+    x = 1
+    y = 1
+    z = 1
+    while UNKNOWN
+        if y < 0
+            z = -1
+        end
+        if x < 0
+            y = -1
+        end
+        x = -1
+    end
+    z
+end
+GreenFairy.test(g2) do r
+    @test !(r.ret_val <= Sign(1))
 end
 # test argument declarations
 g1(x::Int) = x
