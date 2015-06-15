@@ -156,7 +156,7 @@ GreenFairy.test(f10) do r
     @test r.ret_val <= Const(3)
 end
 
-VERB && println("env")
+VERB && println("non-const functions")
 function g12()
 end
 let z = 3
@@ -171,9 +171,30 @@ function f12()
     #UNKNOWN ? g12(2) : h(2) # environment for generic functions does not work yet
     h(2)
 end
-
 GreenFairy.test(f12) do r
     @test r.ret_val <= Ty(Int)
+end
+
+f13() = map(y -> y + 1, [1,2,3])
+GreenFairy.test(f13) do r
+    @test r.ret_val <= Ty(Vector{Int})
+end
+f14() = map(y -> y*1.0, [1,2,3])
+GreenFairy.test(f14) do r
+    @test r.ret_val <= Ty(Union(Vector{Int},Vector{Float64})) # due to map implementation for empty array
+end
+# base implementation special case a lot of function with a runtime test
+# it's confusing to the fairy for now
+rec_foldl(f,v,A) = isempty(A) ? v : rec_foldl(f, f(v,A[1]), A[2:end])
+imp_foldl(f,v,A) = (for x in A; v = f(x,v); end; v)
+function f15()
+    f = (x,y) -> x*y
+    v = 1.0
+    A = [1,2,3]
+    UNKNOWN ? imp_foldl(f,v,A) : rec_foldl(f,v,A)
+end
+GreenFairy.test(f15) do r
+    @test r.ret_val <= Ty(Float64)
 end
 
 VERB && GreenFairy.end_test()

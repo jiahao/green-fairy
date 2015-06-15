@@ -118,13 +118,13 @@ function add_edge!(code, dtree::DomTree, from::Int, dest::Int)
     push!(dtree.pred[dest], (from_lb, from))
     push!(dtree.succ[from_lb+1], (dest, from))
     order,pred,succ = dtree.order,dtree.pred,dtree.succ
-    @show dtree.idom
+    #@show dtree.idom
     #dtinc = build_dom_tree(code, order, pred, succ, dest, dtree.idom)
     dtfull = build_dom_tree(code, order, pred, succ, fill((-1,0),length(pred)))
-    println("Add edge $from $dest")
-    @show pred
+    #println("Add edge $from $dest")
+    #@show pred
     #@show dtinc.idom
-    @show dtfull.idom
+    #@show dtfull.idom
     #=if dtinc.idom != dtfull.idom
         error("incremental error")
     end=#

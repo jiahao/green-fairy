@@ -604,7 +604,11 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
         end
 
         if lbl >= 0 && haskey(s.defs[li].phis, lbl)
-            newval = reduce(join, map(i->get(s.defs[li].vals,i,bot(eltype(C))),s.defs[li].phis[lbl]))
+            newval = bot(eltype(C))
+            
+            for i in s.defs[li].phis[lbl]
+                newval = join(newval, get(s.defs[li].vals,i,bot(eltype(C))))
+            end
             if haskey(s.defs[li].vals, next) && newval <= s.defs[li].vals[next]
             else
                 s.defs[li].vals[next] = newval
@@ -1283,7 +1287,19 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
     end
     if f <= Const(Base.arrayref)
         argtypes[1] <= Ty(Array) || return top(V)
-        return convert(V,Ty(argtypes[1].ty.parameters[1]))
+        aty = argtypes[1].ty
+        resty = bot(Ty)
+        if isa(aty, UnionType)
+            for aty in aty.types
+                @assert(isa(aty,DataType) && aty.name === Array.name)
+                resty = join(resty, Ty(aty.parameters[1]))
+            end
+        elseif isa(aty,DataType) && aty.name === Array.name
+            resty = Ty(aty.parameters[1])
+        else
+            @assert(false, "What is this type $aty")
+        end
+        return convert(V,resty)
     end
     if f <= Const(Base.arrayset)
         return args[1]
@@ -1564,7 +1580,6 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             push!(branch_sd.locals, exc_sd)
         end
         if handler in code.label_pc
-            println("lets go $handler")
             ls = sched.states.funs[t.fc]
             ls.dtree = add_edge!(code, ls.dtree, t.pc, findfirst(code.label_pc, handler))
         elseif handler != length(code.body)+1
@@ -1675,7 +1690,7 @@ function step!(s::Scheduler)
         heappush!(s.threads, t)
     end
 end
-LIM = 500000
+LIM = 1000000
 function run(s::Scheduler; verbose = false)
     nstep = 0
     maxthread = length(s.threads)
