@@ -55,8 +55,6 @@ type Code
     tvar_mapping
     capt :: Vector{Symbol}
     decl_types :: Dict{LocalName,Any}
-    dtree :: DomTree
-    Code(m,n,b,c,l,lo,a,va,tv,cp,d) = new(m,n,b,c,l,lo,a,va,tv,cp,d)
 end
 
 import Base.convert
@@ -543,7 +541,7 @@ type LocalStore{C<:MCell,V<:Lattice}
     sa :: Vector{V}
     len :: Int
     code :: Code
-
+    dtree :: DomTree
     changed :: BitVector
 end
 function Base.getindex(s::LocalStore, pc)
@@ -551,7 +549,7 @@ function Base.getindex(s::LocalStore, pc)
 end
 function LocalStore{C}(::Type{C}, code::Code)
     n = length(code.body)
-    LocalStore(Array(LocalName,0),Array(C,0),Array(DefStore{eltype(C)},0),[bot(eltype(C)) for i=1:n+1], n, code, trues(n+1))
+    LocalStore(Array(LocalName,0),Array(C,0),Array(DefStore{eltype(C)},0),[bot(eltype(C)) for i=1:n+1], n, code, build_dom_tree(code), trues(n+1))
 end
 type Thread
     fc :: Int
@@ -582,10 +580,10 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
     d = sd.locals
     for lsd in d
         if !(lsd.name in s.local_names)
-            push!(s.locals, C(s.len))
+            #push!(s.locals, C(s.len))
             push!(s.local_names, lsd.name)
             ds = DefStore(eltype(C))
-            add_def!(s.code, s.code.dtree, ds, 0, bot(eltype(C)))
+            add_def!(s.code, s.dtree, ds, 0, bot(eltype(C)))
             push!(s.defs, ds)
         end
     end
@@ -595,9 +593,9 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
     if next-1 in s.code.label_pc
         lbl = find_label(s.code,next)
     end
-    for li = 1:length(s.locals)
+    for li = 1:length(s.local_names)
         k = s.local_names[li]
-        v = s.locals[li]
+        #v = s.locals[li]
         idx = 0
         for j=1:length(d)
             if d[j].name === k
@@ -614,10 +612,10 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
             end
         end
         if idx > 0
-            chgd |= propagate!(v,pc,next,d[idx].val)
-            chgd2 |= add_def!(s.code, s.code.dtree, s.defs[li], next, d[idx].val)
+            #chgd |= propagate!(v,pc,next,d[idx].val)
+            chgd2 |= add_def!(s.code, s.dtree, s.defs[li], next, d[idx].val)
         else
-            chgd |= propagate!(v,pc,next)
+            #chgd |= propagate!(v,pc,next)
         end
     end
     sa = sd.sa_name
@@ -647,28 +645,30 @@ function eval_local{C}(s::LocalStore{C}, pc::Int, name::LocalName)
     if idx == 0
         bot(eltype(C))
     else
-        locval = s.locals[idx][pc]
+        #locval = s.locals[idx][pc]
         def = nothing
         val = nothing
         try
-            def = find_def_fast(s.code, s.code.dtree, s.defs[idx], pc)
+            def = find_def_fast(s.code, s.dtree, s.defs[idx], pc)
+            ds = s.defs[idx]
             val = #=if (def[2]-1 in s.code.label_pc)
                 s.defs[idx].phis[find_label(s.code, def[2])]
             else=#
-            s.defs[idx].vals[def[2]]
+            get(ds.vals, def[2], bot(eltype(C)))
             #end
             #@show vals
             #if all(vals .> 0)
             #    ssaval = reduce(join,map(i->s.sa[i],vals))
-            if val == locval
-            else
-                @show pc s.code.label_pc
-                    @show s.defs[idx] def
-                    @show s.defs[idx].vals
+            #if val == locval
+            #else
+                #=@show pc s.code.label_pc
+                @show s.defs[idx] def
+                @show s.defs[idx].vals
                 @show val locval
                 @show s.code.dtree.front
+                @show s.code=#
                 #error()
-                end
+            #    end
             #end
 
             
@@ -692,9 +692,8 @@ function same_state{V}(s::LocalStore, pc::Int, d::Vector{LocalStateDiff{V}})
             return false
         end
     end
-    for li = 1:length(s.locals)
+    for li = 1:length(s.local_names)
         k = s.local_names[li]
-        v = s.locals[li]
         idx = 0
         for j=1:length(d)
             if d[j].name === k
@@ -702,11 +701,7 @@ function same_state{V}(s::LocalStore, pc::Int, d::Vector{LocalStateDiff{V}})
             end
         end
         if idx > 0
-            if !same_state(v,pc,d[idx].val)
-                return false
-            end
-        else
-            if !same_state(v,pc,bot(V))
+            if d[idx].val != get(s.defs[li].vals, 1, bot(V))
                 return false
             end
         end
@@ -1453,6 +1448,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     TRACE && println("Step thread ",t.fc, ":", t.pc)
     next_pc = branch_pc = t.pc+1
     e = code.body[t.pc]
+
     res = if !isempty(t.wait_on)
         ncycled = 0
         final = bot(FinalState{V})
@@ -1569,7 +1565,8 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         end
         if handler in code.label_pc
             println("lets go $handler")
-            add_edge!(code, code.dtree, t.pc, findfirst(code.label_pc, handler))
+            ls = sched.states.funs[t.fc]
+            ls.dtree = add_edge!(code, ls.dtree, t.pc, findfirst(code.label_pc, handler))
         elseif handler != length(code.body)+1
             error("????")
         end
@@ -1625,6 +1622,15 @@ function step!(s::Scheduler)
     end=#
     n = 1
     t = heappop!(s.threads)
+    while !isempty(s.threads)
+        t2 = heappop!(s.threads)
+        if t2.fc == t.fc && t2.pc == t.pc && t2.cycle == t.cycle
+            append!(t.wait_on, t2.wait_on)
+        else
+            heappush!(s.threads, t2)
+            break
+        end
+    end
     k = 0
     try
         step!(s, t, s.config)
@@ -1658,16 +1664,10 @@ function step!(s::Scheduler)
             #reset_changed(s.final, fc)
         end
         if isdone
-            if isbot(s.states.finals[fc])
-                println(s)
-                println("Reached bot for ", s.funs[fc])
-                for b in s.funs[fc].body
-                    Meta.show_sexpr(b);println()
-                end
-                exit()
+            if !isempty(same_func)
+                deleteat!(s.threads, same_func)
+                heapify!(s.threads)
             end
-            deleteat!(s.threads, same_func)
-            heapify!(s.threads)
             s.done[t.fc] = true
         end
         GTRACE && println("THREAD FINISHED ", s.funs[t.fc], " : ", s.states.finals[t.fc],  "================")
@@ -1853,7 +1853,9 @@ function code_from_ast(linf,tenv,sig::ANY)
         if isa(body[pc], LabelNode)
             lnum = body[pc].label+1
             if lnum > length(label_pc)
+                l = length(label_pc)
                 resize!(label_pc, lnum)
+                label_pc[l+1:end] = -1
             end
             label_pc[lnum] = pc
         end
@@ -1878,7 +1880,6 @@ function code_from_ast(linf,tenv,sig::ANY)
     HIT[3] += length(sa)
 
     c = Code(mod, fun_name, body, args_pc, label_pc, locs, args, isva, tenv, capt, decltypes)
-    c.dtree = build_dom_tree(c)
     for i=1:2:length(tenv)
         push!(c.locals, tenv[i].name)
     end
@@ -1902,6 +1903,22 @@ function displayfun(s::Scheduler, fc::Int)
     seekstart(b)
     display("text/html", readall(b))
 end
+
+function print_code(io, sched, fc)
+    c = sched.funs[fc]
+    ls = sched.states.funs[fc]
+    for i=1:length(c.body)
+        print(io, i, "| ")
+        Meta.show_sexpr(io, c.body[i])
+        print(io, " \t")
+        print(io, ls.sa[i])
+              #=for li in 1:length(ls.locals)
+            ls.
+        end=#
+        println()
+    end
+end
+print_code(sched,fc) = print_code(STDOUT,sched,fc)
 
 export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,ExprVal,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice, AliasOf
 
@@ -1937,7 +1954,8 @@ function Base.show(io::IO, s::Stats)
 end
 
 function run(f::Function, args)
-    sched = Analysis.make_sched(Config(:always))
+    global LAST_SC
+    sched = LAST_SC = Analysis.make_sched(Config(:always))
     args = map(args) do a
         if isa(a,Tuple)
             foldl(meet, top(Analysis.ValueT), a)

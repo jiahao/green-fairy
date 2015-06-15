@@ -1,5 +1,8 @@
 function dfs!(code, label, order, n, pred, succ)
     rpc = label == 0 ? 1 : code.label_pc[label]
+    if rpc <= 0
+        order[label+1] = -2
+    end
     order[label+1] == 0 || return n
     order[label+1] = -1
     pc = rpc+1
@@ -45,10 +48,10 @@ function build_dfs(code)
     n = 0
     while true
         i = findfirst(order, 0)
-        i == 0 && break
+        i == 0 && break        
         n = dfs!(code, i-1, order, n, pred, succ) 
     end
-    @assert isperm(order)
+    #@assert isperm(filter(i->i>=1,order))
     m = maximum(order)
     @assert m > 0
     order = (1+m) .- order # reverse post order
@@ -77,58 +80,36 @@ type DomTree
     front :: Vector{Dict{Int,Tuple{Int,Int}}} # label => dom frontier : [ front_label => front range ]
 end
 
-# if inc != -1 do it incrementally assuming only inc changed
-function build_dom_tree(code, order, pred, succ, inc, idom)
+function build_dom_tree(code, order, pred, succ, idom)
     any_changed = true
     order_perm = sortperm(order)
     N = length(code.label_pc)
     @assert order_perm[1] == 1
-    changed = Array(Bool, N+1)
-    if inc == -1
-        fill!(changed,true)
-    else
-        println("inc idom :")
-        @show order pred inc idom
-        fill!(changed,false)
-        inc > 0 && (idom[inc] = (-1,0))
-    end
-    eco = tot = 0
+
     while any_changed
         any_changed = false
         for i=2:N+1
             ni = order_perm[i]-1
             
             new_idom = (-1,0)
-            new_idom2 = idom[ni]
             for p in pred[ni]
                 new_idom = inter_idom(new_idom, p, order, idom)
-                tot += 1
-                if changed[p[1]+1] || idom[ni][1] == -1
-                    new_idom2 = inter_idom(new_idom2, p, order, idom)
-                else
-                    eco+=1
-                end
             end
-            @assert(new_idom2 == new_idom, "Idom : $changed $(pred[ni]) $new_idom2 $new_idom")
             if new_idom != idom[ni]
                 any_changed = true
-                changed[ni+1] = true
-            else
-                changed[ni+1] = false
             end
             idom[ni] = new_idom
         end
     end
-    tot > 0 && println("econom ", 100*(eco/tot), "% = ", eco, "/", tot, " ", N, " nodes ", inc)
     #@assert count(x->x[1] < 0, idom) == 0
-    front = inc == -1 ? dom_front(idom, pred) : Array(Dict{Int,Vector{Tuple{Int,Int}}},0)
+    front = dom_front(idom, pred)
     DomTree(idom, pred, succ, order, order_perm, front)
 end
 
 function build_dom_tree(code)
     order, pred, succ = build_dfs(code)
     N = length(pred)
-    build_dom_tree(code, order, pred, succ, -1, fill((-1,0), N))
+    build_dom_tree(code, order, pred, succ, fill((-1,0), N))
 end
 
 function add_edge!(code, dtree::DomTree, from::Int, dest::Int)
@@ -138,15 +119,15 @@ function add_edge!(code, dtree::DomTree, from::Int, dest::Int)
     push!(dtree.succ[from_lb+1], (dest, from))
     order,pred,succ = dtree.order,dtree.pred,dtree.succ
     @show dtree.idom
-    dtinc = build_dom_tree(code, order, pred, succ, dest, dtree.idom)
-    dtfull = build_dom_tree(code, order, pred, succ, -1, fill((-1,0),length(pred)))
+    #dtinc = build_dom_tree(code, order, pred, succ, dest, dtree.idom)
+    dtfull = build_dom_tree(code, order, pred, succ, fill((-1,0),length(pred)))
     println("Add edge $from $dest")
     @show pred
-    @show dtinc.idom
+    #@show dtinc.idom
     @show dtfull.idom
-    if dtinc.idom != dtfull.idom
+    #=if dtinc.idom != dtfull.idom
         error("incremental error")
-    end
+    end=#
     dtfull
 end
 
@@ -187,7 +168,7 @@ function find_label(code, pc)
     lpc = code.label_pc
     lbl = 0
     for i=1:length(lpc)
-        if lpc[i] < pc
+        if lpc[i] >= 0 && lpc[i] < pc
             if lbl == 0 || lpc[lbl] < lpc[i]
                 lbl = i
             end
@@ -292,13 +273,13 @@ function add_def!{T}(code, dtree::DomTree, d::DefStore{T}, pc::Int, val::T)
         if !haskey(phis, l)
             orig_def = find_def_fast(code, dtree, d, lpc)[2]
             phis[l] = Int[pc, orig_def]
-            chgd |= add_val!(d, l, lpc, d.vals[orig_def])
+            #chgd |= add_val!(d, l, lpc, d.vals[orig_def])
             def_delta += 1
         else
             push!(phis[l], pc)
             def_delta += 1
         end
-        chgd |= add_val!(d, l, lpc, val)
+        #chgd |= add_val!(d, l, lpc, val)
     end
     d.ndefs += def_delta
     chgd

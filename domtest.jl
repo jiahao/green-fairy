@@ -52,10 +52,11 @@ function to_dot(io, code, dtree,colors = Dict{Int,String}())
     N = length(code.label_pc)
     println(io, "graph [ rankdir = \"LR\" ];")
     for i = 0:N
+        j = i == 0 ? 1 : code.label_pc[i]
+        j >= 0 || continue
         println(io, "\"n$i\" [")
 #        i > 0 && haskey(colors, code.label_pc[i]) && println(io, "color = \"#$(colors[code.label_pc[i]])\"")
         println(io, "label = <<table border=\"0\" cellspacing=\"0\">")
-        j = i == 0 ? 1 : code.label_pc[i]
         println(io, "<tr><td port=\"r\" border=\"1\">", i, "</td></tr>")
         j += 1
         stopnext = false
@@ -85,11 +86,10 @@ function to_dot(io, code, dtree,colors = Dict{Int,String}())
             println(io, "\"n$i\":f$o -> \"n$s\":r;")
         end
     end
-    #=for i=1:N
+    for i=1:N
         d,o = dtree.idom[i]
-        dest = o == 0 ? "r" : string("f", (d == 0 ? 1 : code.label_pc[d])+o)
-        println(io, "\"n$i\":r -> \"n$d\":$dest [ color = \"red\" style = \"dashed\" arrowType=\"empty\" ];")
-    end
+        d >= 0 && println(io, "\"n$i\":r -> \"n$d\":f$o [ color = \"red\" style = \"dashed\" arrowType=\"empty\" ];")
+    end#=
     for i=0:N
         for (k,o0) in dtree.front[i+1]
             o = o0[2]
