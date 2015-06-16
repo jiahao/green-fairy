@@ -545,7 +545,7 @@ type LocalStore{C<:MCell,V<:Lattice}
     changed :: BitVector
 end
 function Base.getindex(s::LocalStore, pc)
-    [ k => v[pc] for (k,v) in  zip(s.local_names,s.locals) ]
+    [ k => eval_local(s,pc,k) for k in  s.local_names ]
 end
 function LocalStore{C}(::Type{C}, code::Code)
     n = length(code.body)
@@ -1935,7 +1935,7 @@ function print_code(io, sched, fc)
 end
 print_code(sched,fc) = print_code(STDOUT,sched,fc)
 
-export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,ExprVal,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice, AliasOf
+export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,ExprVal,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice, AliasOf, Config,Stats,Analysis
 
 # == client
 

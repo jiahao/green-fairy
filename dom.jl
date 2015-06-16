@@ -90,15 +90,21 @@ function build_dom_tree(code, order, pred, succ, idom)
         any_changed = false
         for i=2:N+1
             ni = order_perm[i]-1
+            #code.label_pc[ni] < 0 && continue
             
             new_idom = (-1,0)
+            no_pred_idom = true
             for p in pred[ni]
+                if p[1] == 0 || idom[p[1]][1] != -1
+                    no_pred_idom = false
+                end
                 new_idom = inter_idom(new_idom, p, order, idom)
             end
-            if new_idom != idom[ni]
+            if no_pred_idom
+            elseif new_idom != idom[ni]
                 any_changed = true
+                idom[ni] = new_idom
             end
-            idom[ni] = new_idom
         end
     end
     #@assert count(x->x[1] < 0, idom) == 0
@@ -269,15 +275,28 @@ function add_def!{T}(code, dtree::DomTree, d::DefStore{T}, pc::Int, val::T)
     while !isempty(idf)
         lo = heappop!(idf)
         l = operm[lo]
-        lpc = code.label_pc[l]+1
-        if !haskey(phis, l)
-            orig_def = find_def_fast(code, dtree, d, lpc)[2]
-            phis[l] = Int[pc, orig_def]
-            #chgd |= add_val!(d, l, lpc, d.vals[orig_def])
-            def_delta += 1
-        else
-            push!(phis[l], pc)
-            def_delta += 1
+        phi = get!(phis, l, Int[])
+        nfound = 0
+        for (predl,predpc) in dtree.pred[l]
+            predl == 0 || dtree.idom[predl][1] != -1 || continue
+            orig_def = find_def_fast(code, dtree, d, predpc)[2]
+            idx = findfirst(phi, orig_def)
+            if idx == 0
+                push!(phi, orig_def)
+                nfound += 1
+                chgd = true
+            else
+                if idx <= length(phi) - nfound
+                    tmp = phi[end - nfound]
+                    phi[end - nfound] = phi[idx]
+                    phi[idx] = tmp
+                    nfound += 1
+                end
+            end
+        end
+        if nfound < length(phi)
+            deleteat!(phi, 1:(length(phi)-nfound))
+            chgd = true
         end
         #chgd |= add_val!(d, l, lpc, val)
     end

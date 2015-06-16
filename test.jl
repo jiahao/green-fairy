@@ -49,6 +49,17 @@ end
 GreenFairy.test(g2) do r
     @test !(r.ret_val <= Sign(1))
 end
+function g3()
+    x = 2
+    if UNKNOWN
+        x = -2
+        x = 1
+    end
+    x
+end
+GreenFairy.test(g3) do r
+    @test r.ret_val <= Sign(1)
+end
 # test argument declarations
 g1(x::Int) = x
 GreenFairy.test(g1, ()) do r
@@ -195,6 +206,22 @@ function f15()
 end
 GreenFairy.test(f15) do r
     @test r.ret_val <= Ty(Float64)
+end
+
+VERB && println("crashtest")
+# run on some real functions to exercise diverse control flows & stuff
+GreenFairy.test(Core.Inference.typeinf, (), (), ()) do r
+    @test r.ret_val <= Ty(Tuple{Any,Any})
+end
+GreenFairy.test(GreenFairy.run, (), ()) do r
+    sched_T = typeof(Analysis.make_sched(Config(:a)))
+    @test r.ret_val <= Ty(Tuple{sched_T, Stats})
+end
+GreenFairy.test(*, Ty(Matrix{Float64}), Ty(Matrix{Float64})) do r
+    @test r.ret_val <= Ty(Matrix{Float64})
+end
+GreenFairy.test(*, Ty(Matrix{BigFloat}), Ty(Matrix{BigFloat})) do r
+    @test r.ret_val <= Ty(Matrix{BigFloat})
 end
 
 VERB && GreenFairy.end_test()
