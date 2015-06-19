@@ -55,6 +55,10 @@ type Code
     tvar_mapping
     capt :: Vector{Symbol}
     decl_types :: Dict{LocalName,Any}
+    arg_sa :: UnitRange{Int}
+    capt_sa :: UnitRange{Int}
+    targ_sa :: UnitRange{Int}
+    n_sa :: Int
 end
 
 import Base.convert
@@ -534,22 +538,27 @@ end
 
 include("mprod.jl")
 
-type LocalStore{C<:MCell,V<:Lattice}
+type LocalStore{V<:Lattice}
     local_names :: Vector{LocalName}
-    locals :: Vector{C}
-    defs :: Vector{DefStore{V}}
+    defs :: Vector{DefStore{Set{Int}}}
     sa :: Vector{V}
+    nsa :: Vector{V}
     len :: Int
     code :: Code
     dtree :: DomTree
+    heap :: Vector{Set{Any}}
     changed :: BitVector
 end
 function Base.getindex(s::LocalStore, pc)
     [ k => eval_local(s,pc,k) for k in  s.local_names ]
 end
-function LocalStore{C}(::Type{C}, code::Code)
+function LocalStore{V}(::Type{V}, code::Code)
     n = length(code.body)
-    LocalStore(Array(LocalName,0),Array(C,0),Array(DefStore{eltype(C)},0),[bot(eltype(C)) for i=1:n+1], n, code, build_dom_tree(code), trues(n+1))
+    LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),V[bot(V) for i=1:n+1], V[bot(V) for i=1:code.n_sa], n, code, build_dom_tree(code), [Set{Any}() for i=1:n+1], trues(n+1))
+end
+function fresh_sa!{V}(s::LocalStore{V})
+    push!(s.nsa, bot(V))
+    return -length(s.nsa)
 end
 type Thread
     fc :: Int
@@ -576,26 +585,26 @@ type StateDiff{V,TV}
 end
 
 
-function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
+function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
     d = sd.locals
     for lsd in d
         if !(lsd.name in s.local_names)
-            #push!(s.locals, C(s.len))
             push!(s.local_names, lsd.name)
-            ds = DefStore(eltype(C))
-            add_def!(s.code, s.dtree, ds, 0, bot(eltype(C)))
+            ds = DefStore(Set{Int})
+            add_def!(s.code, s.dtree, ds, 0, 0)
             push!(s.defs, ds)
         end
     end
     chgd = false
     chgd2 = false
+    isphi = false
     lbl = -1
     if next-1 in s.code.label_pc
         lbl = find_label(s.code,next)
     end
+    
     for li = 1:length(s.local_names)
         k = s.local_names[li]
-        #v = s.locals[li]
         idx = 0
         for j=1:length(d)
             if d[j].name === k
@@ -604,10 +613,11 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
         end
 
         if lbl >= 0 && haskey(s.defs[li].phis, lbl)
-            newval = bot(eltype(C))
+            isphi = true
+            newval = Set{Int}()
             
             for i in s.defs[li].phis[lbl]
-                newval = join(newval, get(s.defs[li].vals,i,bot(eltype(C))))
+                newval = union!(newval, get(s.defs[li].vals,i,Set{Int}()))
             end
             if haskey(s.defs[li].vals, next) && newval <= s.defs[li].vals[next]
             else
@@ -616,10 +626,7 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
             end
         end
         if idx > 0
-            #chgd |= propagate!(v,pc,next,d[idx].val)
-            chgd2 |= add_def!(s.code, s.dtree, s.defs[li], next, d[idx].val)
-        else
-            #chgd |= propagate!(v,pc,next)
+            chgd2 |= add_def!(s.code, s.dtree, s.defs[li], next, d[idx].saval)
         end
     end
     sa = sd.sa_name
@@ -630,13 +637,7 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
             chgd = chgd2 = true
         end
     end
-    #=for i=1:s.len+1
-        if i == sd.sa_name
-            chgd |= propagate!(s.sa[i], pc, next, sd.sa_val)
-        else
-            chgd |= propagate!(s.sa[i], pc, next)
-        end
-    end=#
+
     if chgd2
         fill!(s.changed, true)
     else
@@ -644,10 +645,10 @@ function propagate!{C}(s::LocalStore{C},pc::Int,next::Int,sd::StateDiff)
     end
     s.changed[next]
 end
-function eval_local{C}(s::LocalStore{C}, pc::Int, name::LocalName)
+function eval_local{V}(s::LocalStore{V}, pc::Int, name::LocalName)
     idx = findfirst(s.local_names, name)
     if idx == 0
-        bot(eltype(C))
+        Set{Int}()
     else
         #locval = s.locals[idx][pc]
         def = nothing
@@ -658,7 +659,7 @@ function eval_local{C}(s::LocalStore{C}, pc::Int, name::LocalName)
             val = #=if (def[2]-1 in s.code.label_pc)
                 s.defs[idx].phis[find_label(s.code, def[2])]
             else=#
-            get(ds.vals, def[2], bot(eltype(C)))
+            get(ds.vals, def[2], Set{Int}())
             #end
             #@show vals
             #if all(vals .> 0)
@@ -678,7 +679,7 @@ function eval_local{C}(s::LocalStore{C}, pc::Int, name::LocalName)
             
         catch
             println("Error while evaling $name")
-            @show s.defs[idx] def locval s.defs[idx].vals
+            @show s.defs[idx] def s.defs[idx].vals
             @show collect(enumerate(s.code.label_pc))
             rethrow()
         end
@@ -686,40 +687,30 @@ function eval_local{C}(s::LocalStore{C}, pc::Int, name::LocalName)
     end
 end
 
-function eval_local(s::LocalStore, pc::Int, name::Int)
-    s.sa[name]
+function eval_local{V}(s::LocalStore{V}, pc::Int, name::Int)
+    if name > 0
+        s.sa[name]
+    elseif name < 0
+        s.nsa[-name]
+    else
+        bot(V)
+    end
 end
 
-function same_state{V}(s::LocalStore, pc::Int, d::Vector{LocalStateDiff{V}})
-    for lsd in d
-        if !(lsd.name in s.local_names)
-            return false
-        end
-    end
-    for li = 1:length(s.local_names)
-        k = s.local_names[li]
-        idx = 0
-        for j=1:length(d)
-            if d[j].name === k
-                idx = j
-            end
-        end
-        if idx > 0
-            if d[idx].val != get(s.defs[li].vals, 1, bot(V))
-                return false
-            end
-        end
+function same_state(s::LocalStore, prelude)
+    for i=1:length(prelude)
+        s.nsa[i] == prelude[i] || return false
     end
     true
 end
-immutable State{LV,C,FinalT}
-    funs :: Vector{LocalStore{C,LV}} # TODO better name
+immutable State{LV,FinalT}
+    funs :: Vector{LocalStore{LV}} # TODO better name
     finals :: Vector{FinalT}
     lost :: Vector{Set{Int}}
 end
-State{V,C,FinalT}(::Type{V},::Type{C},::Type{FinalT}) = State{V,C,FinalT}(Array(LocalStore{C,V}, 0), Array(FinalT,0), Array(Set{Int}, 0))
-function ensure_filled!{V,C,F}(s::State{V,C,F}, fc::Int, code::Code)
-    push!(s.funs, LocalStore(C, code))
+State{V,FinalT}(::Type{V},::Type{FinalT}) = State{V,FinalT}(Array(LocalStore{V}, 0), Array(FinalT,0), Array(Set{Int}, 0))
+function ensure_filled!{V,F}(s::State{V,F}, fc::Int, code::Code)
+    push!(s.funs, LocalStore(V, code))
     push!(s.finals, bot(F))
     push!(s.lost, Set{Int}())
 end
@@ -732,9 +723,7 @@ function propagate!{V,LV}(s::State,fc::Int,pc::Int,next::Int,sd::StateDiff{V,LV}
     chgd |= (l != length(s.lost[fc]))
     
     if next == s.funs[fc].len+1
-#        nottop = !istop(s.finals[fc].ret_val)
         chgd |= propagate!(s,s.finals[fc],fc,pc,sd)
-#        istop(s.finals[fc].ret_val) && nottop && fc == 1 && error()
     end
     chgd |= propagate!(s.funs[fc],pc,next,sd)
     chgd
@@ -781,8 +770,8 @@ function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
     end
     chgd
 end
-function same_state(s::State, fc::Int, pc::Int, sd)
-    same_state(s.funs[fc], pc, sd)
+function same_state(s::State, fc::Int, prelude)
+    same_state(s.funs[fc], prelude)
 end
 function Base.getindex(s::State, fc::Int, pc::Int)
     s.funs[fc][pc]
@@ -953,8 +942,8 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         DEBUGWARN && warn(@sprintf("Wrong arg count for %s : %s vs %s%s", fcode, fcode.args, args, fcode.isva ? " (vararg)" : ""))
         return
     end
-    sd = StateDiff(child,V,Ty)
-    sizehint!(sd.locals, length(fcode.args) + div(length(fcode.tvar_mapping),2) + length(fcode.capt))
+    prelude_sa = Array(V, fcode.n_sa)
+    sd = StateDiff(child,V,V)
     for i = 1:narg
         argname = fcode.args[i]
         arg = args[i]
@@ -967,12 +956,14 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
                 arg = meet(arg, convert(V,Ty(declty)))
             end
         end
-        eval_assign!(sched, sd, fcode, argname, arg, -1)
+        prelude_sa[-arg_sa(fcode,i)] = arg
+        eval_assign!(sched, sd, fcode, argname, bot(V), arg_sa(fcode, i))
     end
     if fcode.isva
         tup = eval_call_values!(sched, child, sd, convert(V,Const(Base.tuple)), vargs)
         @assert tup !== nothing
-        eval_assign!(sched, sd, fcode, fcode.args[end], tup, -1)
+        eval_assign!(sched, sd, fcode, fcode.args[end], bot(V), arg_sa(fcode, narg+1))
+        prelude_sa[-arg_sa(fcode,narg+1)] = tup
     end
     for i=1:2:length(fcode.tvar_mapping)
         tv = fcode.tvar_mapping[i]
@@ -982,18 +973,20 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         else
             convert(V,Const(tval))
         end
-        eval_assign!(sched, sd, fcode, tv.name, aval, -1)
+        eval_assign!(sched, sd, fcode, tv.name, bot(V), targ_sa(fcode, div(i+1,2)))
+        prelude_sa[-targ_sa(fcode,div(i+1,2))] = aval
     end
     length(env) == length(fcode.capt) || DEBUGWARN && warn(@sprintf("Wrong env size %d vs %d : %s vs %s", length(env), length(fcode.capt), env, fcode.capt))
     for i=1:length(fcode.capt)
-        eval_assign!(sched, sd, fcode, fcode.capt[i], i > length(env) ? top(V) : convert(V,env[i]), -1)
+        eval_assign!(sched, sd, fcode, fcode.capt[i], bot(V), capt_sa(fcode, i))
+        prelude_sa[-capt_sa(fcode,i)] = i > length(env) ? top(V) : convert(V,env[i])
     end
     
     fc = 0
     for fc2 in 1:length(sched.funs)
         if sched.funs[fc2] === fcode
             @assert sd.sa_name == -1
-            if same_state(sched.states, fc2, 1, sd.locals)
+            if same_state(sched.states, fc2, prelude_sa)
                 fc = fc2
                 break
             else
@@ -1005,6 +998,10 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
     end
     
     child.fc = fc
+    
+    for i=1:length(prelude_sa)
+        sched.states.funs[fc].nsa[i] = prelude_sa[i]
+    end
     propagate!(sched.states, fc, 0, 1, sd)
     heappush!(sched.threads, child)
 
@@ -1020,11 +1017,11 @@ function eval_call!{V,S}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::I
         stack[i] = eval_local(sched.states,t.fc,t.pc,args[i])
     end
     f = eval_local(sched.states,t.fc,t.pc,fun)
-    eval_call_values!(sched, t, sd, f, stack)
+    sd.sa_val = eval_call_values!(sched, t, sd, f, stack)
 end
 
 function eval_call_values!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V, args::Vector{V})
-    any(isbot, args) && (#=println("bot arg ", args); =#return bot(V))
+    (isbot(fun) || any(isbot, args)) && (#=println("bot arg ", args); =#return bot(V))
     f = convert(Const,fun)
     if f <= Const(Base._apply)
         actual_args = V[]
@@ -1114,7 +1111,7 @@ end
 
 function eval_new!{V}(sched::Scheduler, t::Thread, sd::StateDiff, args::V...)
     any(isbot, args) && return bot(V)
-    eval_call_values!(sched, t, sd, V, meet(top(V), Const(OtherBuiltins.new)), collect(args))
+    sd.sa_val = eval_call_values!(sched, t, sd, V, meet(top(V), Const(OtherBuiltins.new)), collect(args))
 end
 
 @generated function eval_call_values!{Ls}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Prod{Ls}}, f::Prod{Ls}, args::Vector{Prod{Ls}})
@@ -1417,7 +1414,8 @@ function eval_call_values!{V,EV}(sched::Scheduler, t::Thread, sd::StateDiff, ::T
         istop(code) && return top(V)
         actual_code = code_from_ast(code.v, (), Tuple)
         # TODO the env evaluation should be part of the expr tree
-        env = map!(capt_var -> convert(EV,eval_local(sched.states,t.fc,t.pc, capt_var)), Array(EV, length(actual_code.capt)), actual_code.capt)
+        #env = map!(capt_var -> convert(EV,eval_local(sched.states,t.fc,t.pc, capt_var)), Array(EV, length(actual_code.capt)), actual_code.capt)
+        env = map(capt -> convert(EV,capt), args[3:end])
         return convert(V,ConstCode(EV, actual_code, tuple(env...)))
     end
     top(V)
@@ -1426,20 +1424,24 @@ end
 function eval_assign!{V}(sched,sd,code,name,res::V,saval::Int)
     if name in code.locals || isa(name,GenSym)
         push!(sd.locals, LocalStateDiff(name, res, saval))
+        sd.sa_val = res
     else
         # TODO unknown effects
     end
     nothing
 end
 
-function eval_sym{V}(sched::Scheduler{V},t,sd,code,e)
+function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
     if e in code.locals || isa(e,GenSym)
-        eval_local(sched.states, t.fc, t.pc, e)
+        ls = sched.states.funs[t.fc]
+        names = eval_local(ls, t.pc, e)
+        val = foldl((x,y)->join(x,eval_local(ls,t.pc,y)),bot(V),names)
+        sd.sa_val = val
     elseif isa(e,Symbol) && isconst(code.mod,e)
-        convert(V, Const(getfield(code.mod,e)))
+        sd.sa_val = convert(V, Const(getfield(code.mod,e)))
     else
         may_throw!(sd, Ty(UndefVarError))
-        top(V) # global
+        sd.sa_val = top(V) # global
     end
 end
 StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, bot(LV), Array(Int,0), bot(LV), bot(TV), false)
@@ -1465,7 +1467,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     next_pc = branch_pc = t.pc+1
     e = code.body[t.pc]
 
-    res = if !isempty(t.wait_on)
+    if !isempty(t.wait_on)
         ncycled = 0
         final = bot(FinalState{V})
         for i = 1:length(t.wait_on)
@@ -1489,7 +1491,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         else
             may_throw!(sd, final.thrown)
         end
-        final.ret_val
+        sd.sa_val = final.ret_val
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
         args = code.call_args[t.pc]
         if e.head === :new
@@ -1500,46 +1502,34 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         end
     elseif isa(e, LocalName)
         if e === :UNKNOWN
-            top(V)
+            sd.sa_val = top(V)
         else
-            eval_sym(sched, t, sd, code, e)
+            eval_sym!(sched, t, sd, code, e)
         end
-    elseif isa(e, LambdaStaticData)
-        # canonicalize static AST into : new(Function, ast)
-        # should probably be new(Function, ast, env) but for now this is done
-        # internally
-        eval_new!(sched, t, sd, convert(V,Const(Function)), convert(V,Const(e)))
     elseif isa(e,Expr) && e.head === :return
-        retval = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
+        sd.sa_val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
         next_pc = branch_pc = length(code.body)+1
-        retval
     elseif isa(e,GotoNode)
         next_pc = branch_pc = code.label_pc[e.label::Int+1]
-        convert(V,Const(nothing))
     elseif isa(e,Expr) && e.head === :gotoifnot
         branch_pc = code.label_pc[e.args[2]::Int+1]
-        val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
-        if val <= Const(true)
+        sd.sa_val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
+        if sd.sa_val <= Const(true)
             branch_pc = next_pc
-        elseif val <= Const(false)
+        elseif sd.sa_val <= Const(false)
             next_pc = branch_pc
         end
-        val
     elseif isa(e,Expr) && e.head === :(=)
         @assert next_pc == branch_pc
         val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
         eval_assign!(sched, sd, code, e.args[1]::LocalName, val, code.call_args[t.pc][1])
-        val
     elseif isa(e,Expr) && e.head == :enter
         push!(t.eh_stack, code.label_pc[e.args[1]::Int+1])
-        convert(V,Const(nothing))
     elseif isa(e,Expr) && e.head == :leave
         for i=1:(e.args[1]::Int)
             pop!(t.eh_stack)
         end
-        convert(V,Const(nothing))
     elseif isa(e,Expr) && e.head in (:line,:boundscheck,:meta,:simdloop) || isa(e,LineNumberNode)
-        convert(V,Const(nothing))
     elseif isa(e,Expr)
         dump(e)
         error("unknown expr")
@@ -1549,16 +1539,15 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         elseif isa(e, QuoteNode)
             e = e.value
         end
-        convert(V,Const(e))
+        sd.sa_val = convert(V,Const(e))
     end
     if !isempty(t.wait_on)
         return
     end
     sd.sa_name = t.pc
-    sd.sa_val = res
-    sd.value = res # TODO remove this
+    sd.value = sd.sa_val # TODO remove this
     
-    TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", res))
+    TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", sd))
     
     could_throw = !isbot(sd.thrown)
     must_throw = sd.must_throw
@@ -1653,14 +1642,11 @@ function step!(s::Scheduler)
         println("Exception while executing ", t, " :")
         println(x)
         println("Function : ", s.funs[t.fc])
-        #println(s)
         rethrow(x)
     end
     if done(s,t)
         fc = t.fc
         t.pc = length(s.funs[fc].body) + 1
-        #join!(s.final, fc, t.final)
-        #deleteat!(s.threads,n)
         push!(s.done_threads,t)
         
         same_func = Array(Int,0)
@@ -1672,11 +1658,8 @@ function step!(s::Scheduler)
         
         isdone = isempty(same_func)
         mincycle = isdone ? -1 : minimum([s.threads[i].cycle for i in same_func])
-        #println("Thread finished at ", s.funs[fc], " : ", t.cycle, " min ", mincycle)
         if !isdone && mincycle > t.cycle
             isdone = mincycle > s.states.finals[fc].last_cycle
-            #isdone = !has_changed(s.final, fc)
-            #reset_changed(s.final, fc)
         end
         if isdone
             if !isempty(same_func)
@@ -1699,7 +1682,6 @@ function run(s::Scheduler; verbose = false)
         maxthread = max(maxthread, length(s.threads))
         if verbose && nstep % 10000 == 0
             println("... (", maxthread, ", ", length(s.funs), ")")
-            #println(s)
         end
         nstep += 1
     end
@@ -1707,17 +1689,12 @@ function run(s::Scheduler; verbose = false)
 end
 function Base.show(io::IO, s::Scheduler)
     println(io, "====== scheduler (", length(s.threads), " active threads, ", length(s.funs), " functions):")
-#=    for t in s.threads
-        println(io, "thread ", t)
-    end=#
     page_out = isa(io, Base.Terminals.TTYTerminal)
     fcs = [t.fc for t in s.threads]
     dfcs = [t.fc for t in s.done_threads]
     nthr = Dict([u => length(findin(fcs,u)) for u in unique(fcs)])
     dnthr = Dict([u => length(findin(dfcs,u)) for u in unique(dfcs)])
     for (k,v) in enumerate(s.funs)
-        #        get(nthr,k,0) > 0 || continue
-        #if !istop(s.final[k].ret_val); continue; end
         println(io, "==== fun ", k, ": ", v)
         println(io, "threads : ", get(nthr,k,0), " active, ", get(dnthr,k,0), " done")
         callers = map(cfc -> (s.funs[cfc[1]], cfc[2]), collect(s.called_by[k]))
@@ -1758,13 +1735,25 @@ function linearize_stmt!(stmt,body,args_pc)
     elseif isa(stmt,Expr) && stmt.head === :copyast
         push!(body,stmt.args[1])
         push!(args_pc,())
-    elseif isa(stmt,Expr) && stmt.head === :& # TODO this is not correct
+    elseif isa(stmt,Expr) && (stmt.head === :& || stmt.head === :const)# TODO this is not correct
         linearize_stmt!(stmt.args[1], body, args_pc)
     elseif isa(stmt,Expr) && stmt.head in (:type_goto, :static_typeof)
         error("type_goto/static_typeof are not supported (and never will ?)")
     elseif isa(stmt,Expr) && stmt.head === :the_exception
         push!(body, :the_exception) # TODO name collision, make this a proper part of state
         push!(args_pc,())
+    elseif isa(stmt,LambdaStaticData)
+        push!(body,Function) # canonicalize inline ASTs into :
+        push!(args_pc,())    # new(Function, ast, env...)
+        push!(body,stmt)
+        push!(args_pc,())
+        capts = capt_from_ast(stmt)
+        for capt in capts
+            push!(body, capt)
+            push!(args_pc,())
+        end
+        push!(args_pc, tuple(((length(body)-1-length(capts)):length(body))...))
+        push!(body, Expr(:new, Function, stmt, capts...))
     else
         push!(body,stmt)
         push!(args_pc,())
@@ -1793,6 +1782,18 @@ end
 const HIT = [0,0,0]
 const _code_cache = ObjectIdDict()#Dict{Any,Code}()
 const SR = []
+
+function capt_from_ast(ast)
+    if !isa(ast,Expr)
+        ast = Base.uncompressed_ast(ast)
+    end
+    capt = Array(Symbol, 0)
+    for varinfo in ast.args[2][3] # captured
+        name = varinfo[1]
+        push!(capt, name)
+    end
+    capt
+end
 function code_from_ast(linf,tenv,sig::ANY)
     TRACE = GTRACE
     key = (linf,tenv) # TODO svec don't hash correctly with tvars ?
@@ -1840,25 +1841,16 @@ function code_from_ast(linf,tenv,sig::ANY)
         isva && argn==length(args) && (ty = Tuple{Vararg{ty}})
         decltypes[args[argn]] = eval_typ_in(ty, tenv)
     end
+    arg_sa = 1:length(args)
     if isva
         decltypes[args[end]] = Tuple{sigtypes[end]}
     end
-    capt = Array(Symbol, 0)
+    capt = capt_from_ast(ast)
     union!(locs,args)
-    #=for varinfo in ast.args[2][2] # locals
-        name = varinfo[1]
-        if !(name in locs)
-            error(@sprintf("Unknown varinfo : %s", varinfo))
-        end
-        decltypes[name] = varinfo[2]
-    end=#
-    for varinfo in ast.args[2][3] # captured
-        name = varinfo[1]
-        #decltypes[name] = varinfo[2]
-        push!(capt, name)
-    end
     union!(locs,capt)
-    push!(locs, :the_exception) #TODO ugh
+    capt_sa = (1:length(capt)) + length(args)
+    targ_sa = (1:div(length(tenv),2)) + length(capt) + length(args)
+    push!(locs, :the_exception, :UNKNOWN) #TODO ugh
 
     label_pc = Array(Int, 0)
     gensy = Set{Int}()
@@ -1894,13 +1886,17 @@ function code_from_ast(linf,tenv,sig::ANY)
     HIT[2] += length(locs)
     HIT[3] += length(sa)
 
-    c = Code(mod, fun_name, body, args_pc, label_pc, locs, args, isva, tenv, capt, decltypes)
+    c = Code(mod, fun_name, body, args_pc, label_pc, locs, args, isva, tenv, capt, decltypes, arg_sa, capt_sa, targ_sa, length(args) + length(capt) + div(length(tenv),2))
     for i=1:2:length(tenv)
         push!(c.locals, tenv[i].name)
     end
     _code_cache[key] = c
     c
 end
+
+arg_sa(code::Code, i::Int) = -code.arg_sa[i]
+capt_sa(code::Code, i::Int) = -code.capt_sa[i]
+targ_sa(code::Code, i::Int) = -code.targ_sa[i]
 
 const _staged_cache = ObjectIdDict()#Dict{Any,Any}()
 
@@ -1945,7 +1941,7 @@ const ValueTup = (Const,Ty,Kind,Sign,Birth,ConstCode{Ty})
 const ValueT = Prod{Tuple{ValueTup...}}
 const (MValueT,CellT) = GreenFairy.make_mprod(ValueTup)
 const FinalT = FinalState{ValueT}
-make_sched(conf) = Scheduler{ValueT,State{ValueT,CellT,FinalT}}(State(ValueT,CellT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
+make_sched(conf) = Scheduler{ValueT,State{ValueT,FinalT}}(State(ValueT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
 end
 
 immutable Stats
@@ -1958,14 +1954,14 @@ function Base.show(io::IO, s::Stats)
     dt = s.total_time
     niter = s.n_iteration
     maxthr = s.max_concurrent_threads
-    @printf("Analysis completed in %.2f s\n", dt)
-    @printf("\t%d max concurrent threads\n", maxthr)
+    @printf(io, "Analysis completed in %.2f s\n", dt)
+    @printf(io, "\t%d max concurrent threads\n", maxthr)
     if niter >= 1000
-        @printf("\t%.2f K iterations\n", niter/1000)
+        @printf(io, "\t%.2f K iterations\n", niter/1000)
     else
-        @printf("\t%d iterations\n", niter)
+        @printf(io, "\t%d iterations\n", niter)
     end
-    @printf("\t%.2f Kit/s\n", (niter/1000)/dt)
+    @printf(io, "\t%.2f Kit/s\n", (niter/1000)/dt)
 end
 
 function run(f::Function, args)
@@ -1995,6 +1991,8 @@ function test(after::Function, f::Function, args...)
     global ntests
     s, stats = run(f, args)
     after(s.states.finals[1])
+    @show stats
+    @show s.states.finals[1].ret_val
     ntests += 1
 end
 function end_test()

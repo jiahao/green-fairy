@@ -232,27 +232,22 @@ function Base.show(io::IO, ds::DefStore)
     end
 end
 DefStore{T}(::Type{T}) = DefStore{T}(Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(), Dict{Int,T}(), Array(Tuple{Int,T},0), 0)
-function add_val!{T}(d::DefStore{T}, l::Int, pc::Int, val::T)
-    if haskey(d.vals, pc)
-        old = d.vals[pc]
-        if val <= old
-            false
-        else
-            d.vals[pc] = join(old,val)
-            true
-        end
+function add_val!(d::DefStore, l::Int, pc::Int, val)
+    old = get!(d.vals, pc, Set{Int}())
+    if val in old
+        false
     else
-        d.vals[pc] = val
+        push!(d.vals[pc], val)
         true
     end
 end
-function add_def!{T}(code, dtree::DomTree, d::DefStore{T}, pc::Int, val::T)
+function add_def!(code, dtree::DomTree, d::DefStore, pc::Int, val)
     l = find_label(code, pc)
     def_delta = 0
     defs = d.defs
     vals = d.vals
     phis = d.phis
-    push!(d.odef, (pc,val))
+    #push!(d.odef, (pc,val))
     need_phis = false
     if !haskey(defs, l)
         defs[l] = Int[pc]
