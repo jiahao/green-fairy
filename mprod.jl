@@ -1,3 +1,100 @@
+type StateCell{T}
+    val_isset :: BitVector
+    val_rle :: Vector{T}
+end
+
+StateCell{T}(::Type{T},n::Int) = StateCell(fill!(BitVector(n+1),false),Array(T,0))
+function Base.getindex{T}(s::StateCell{T}, pc)
+    idx = countnz(s.val_isset, pc)
+    v2 = if idx == 0
+        bot(T)
+    else
+        s.val_rle[idx]
+    end
+    v2
+end
+# ASSUMES NON TRIVIAL INSERT
+function Base.setindex!{T}(s::StateCell{T},v::T,pc::Int)
+    isset = s.val_isset
+    val = s.val_rle
+    self_isset = s.val_isset[pc]
+    idx = countnz(isset, pc)
+    not_last = pc < length(isset)
+    @inbounds if self_isset # already set
+        if idx == 1 && isbot(v) || idx > 1 && val[idx-1] == v # collapse into prev
+            if not_last && !isset[pc+1] # reuse current for next
+                isset[pc+1] = true
+            else
+                if not_last && isset[pc+1] && val[idx+1] == v # collapse current & next into prev
+                    isset[pc+1] = false
+                    deleteat!(val, idx+1)
+                end
+                deleteat!(val, idx)
+            end
+            isset[pc] = false
+        elseif not_last && !isset[pc+1] # preserve next
+            insert!(val, idx+1, idx > 0 ? val[idx] : bot(T))
+            val[idx] = v
+            isset[pc+1] = true
+        elseif not_last && val[idx+1] == v
+            deleteat!(val, idx)
+            isset[pc+1] = false
+        else # update in place
+            val[idx] = v
+        end
+    elseif idx == 0 && !isbot(v) || idx > 0 && val[idx] != v # need to set
+        isset[pc] = true
+        if not_last && isset[pc+1] && val[idx+1] == v # reuse next for current
+            isset[pc+1] = false
+        else
+            insert!(val, idx+1, v)
+            if not_last && !isset[pc+1] # preserve next
+                insert!(val, idx+2, idx > 0 ? val[idx] : bot(T))
+                isset[pc+1] = true
+            end
+        end
+    end
+    s
+end
+
+@inline function propagate!{T}(s::StateCell{T},pc::Int,next::Int)
+    pc > 0 || return false
+    @inbounds begin
+        next != pc+1 || s.val_isset[next] || return false
+        s_pc = s[pc]
+        s_next = s[next]
+        return if s_pc <= s_next
+            false
+        else
+            val = isbot(s_next) ? s_pc : join(s_next,s_pc)
+            if !(val <= s_next)
+                s[next] = val
+                true
+            else
+                false
+            end
+        end
+    end
+end
+function propagate!{T}(s::StateCell{T},pc::Int,next::Int,d::T)
+    s_next = s[next]
+    if d <= s_next
+        false
+    else
+        val = isbot(s_next) ? d : join(s_next,d)
+        if !(val <= s_next)
+            s[next] = val
+            true
+        else
+            false
+        end
+    end
+end
+function same_state{T}(s::StateCell{T},pc::Int,d::T)
+    d == s[pc]
+end
+
+
 abstract MProd{T <: Tuple{Vararg{Lattice}}}
 abstract MCell{T <: Tuple{Vararg{Lattice}}}
 
