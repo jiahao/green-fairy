@@ -1054,7 +1054,8 @@ end
 const INTR_TYPES = [
                     (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float, Base.isdefined, Base.fpiseq, Base.fpislt]),
                     (Int,[Core.sizeof]),
-                    (DataType, [Base.fieldtype, Base.apply_type]),
+                    (DataType, [Base.fieldtype]),
+                    (Union{DataType,Union},[Base.apply_type]),
                     (UnionType, [Base.Union]),
                     (SimpleVector, [Base.svec]),
                     (Any,[Core.eval]),
@@ -1185,9 +1186,8 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
         return convert(V, Ty(Bool))
     end
     if f <= Const(Base.pointerref)
-        cty = convert(Kind,args[1])
-        (istop(cty) || !(cty.ub <: Ptr)) && return top(V)
-        return convert(V, Ty(cty.v.parameters[1]))
+        argtypes[1] <= Ty(Base.Ptr) || return top(V)
+        return convert(V, Ty(argtypes[1].ty.parameters[1]))
     end
 
     if DEBUGWARN
@@ -1219,7 +1219,7 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
             try
                 res = Const(rf(argvals...))
             catch exc
-                DEBUGWARN && warn("thrown calling ", f, " ", argvals)
+                warn("thrown calling ", f, " ", argvals)
                 must_throw!(sd, Ty(typeof(exc))) # TODO could be more precise here
             end
             return convert(V,res)
@@ -1367,6 +1367,10 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             may_throw!(sd, final.thrown)
         end
         sd.sa_val = final.ret_val
+        if isbot(sd.sa_val)
+            #println("returned bot in $(t.fc) $code :")
+            #show_dict(STDOUT, sched.states[t.fc,1])
+        end
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
         args = code.call_args[t.pc]
         if e.head === :new
@@ -1413,7 +1417,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         error("unknown expr")
     else
         if isa(e, TopNode)
-            e = eval(Base,e.name)
+            e = getfield(ccall(:jl_base_relative_to, Any, (Any,), code.mod)::Module,e.name)
         elseif isa(e, QuoteNode)
             e = e.value
         end
@@ -1530,7 +1534,7 @@ function step!(s::Scheduler)
         end
         GTRACE && println("THREAD FINISHED ", s.funs[t.fc], " : ", s.states.finals[t.fc],  "================")
         if isdone
-            GTRACE && println("FUN FINISHED ", s.states.finals[t.fc])
+            GTRACE && println("FUN FINISHED $(t.fc) $(s.funs[t.fc])", s.states.finals[t.fc])
             if !isempty(same_func)
                 deleteat!(s.threads, same_func)
                 heapify!(s.threads)
@@ -1543,7 +1547,7 @@ function step!(s::Scheduler)
     end
     t.fc, tpc
 end
-LIM = 1000
+LIM = Inf
 function run(s::Scheduler; verbose = false)
     nstep = 0
     maxthread = length(s.threads)
