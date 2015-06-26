@@ -24,6 +24,7 @@ function dfs!(code, label, order, n, pred, succ)
             n = dfs!(code, l, order, n, pred, succ)
         elseif isa(e,LabelNode)
             l = (e::LabelNode).label+1
+            pc -= 1
             push!(pred[l], (label,pc))
             push!(succ[label+1], (l,pc))
             n = dfs!(code, l, order, n, pred, succ)
@@ -174,7 +175,7 @@ function find_label(code, pc)
     lpc = code.label_pc
     lbl = 0
     for i=1:length(lpc)
-        if lpc[i] >= 0 && lpc[i] < pc
+        if lpc[i] >= 0 && lpc[i] <= pc
             if lbl == 0 || lpc[lbl] < lpc[i]
                 lbl = i
             end
@@ -198,16 +199,15 @@ function iterated_domfront(code, dtree, pc)
     order = dtree.order
     while !isempty(todo)
         lb = pop!(todo)
-        (order[lb] in idf) && continue
-        heappush!(idf, order[lb])
-        df!(code, dtree, code.label_pc[lb]+1, todo)
+        (order[lb+1] in idf) && continue
+        heappush!(idf, order[lb+1])
+        df!(code, dtree, code.label_pc[lb], todo)
     end
     idf
 end
 type DefStore{T}
     defs :: Dict{Int,Vector{Int}} # label => pcs
-    phis :: Dict{Int,Vector{Int}} # label => incomings
-    
+    phis :: Dict{Int,Vector{Int}} # label => incomings    
     vals :: Dict{Int,T} # pc => val
     odef :: Vector{Tuple{Int,T}}
     ndefs :: Int
@@ -267,9 +267,14 @@ function add_def!(code, dtree::DomTree, d::DefStore, pc::Int, val)
     
     operm = dtree.order_perm
     idf = iterated_domfront(code, dtree, pc)
+    todos = Dict{Int,Vector{Int}}()
+    for l in idf
+        l = operm[l]-1
+        get!(phis, l, Int[])
+    end
     while !isempty(idf)
         lo = heappop!(idf)
-        l = operm[lo]
+        l = operm[lo]-1
         phi = get!(phis, l, Int[])
         nfound = 0
         for (predl,predpc) in dtree.pred[l]
@@ -312,7 +317,7 @@ function find_def_fast(code, dtree, ds, pc)
         end
     end
     if haskey(phis, l)
-        return (l, code.label_pc[l]+1)
+        return (l, code.label_pc[l])
     end
     @assert(l != 0, "use not dominated by a def")
     id,pc = dtree.idom[l]

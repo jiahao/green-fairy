@@ -8,14 +8,19 @@ using Base.Test
 VERB = true
 GreenFairy.start_test()
 
+returns(r) = @test !isbot(r.ret_val)
+
 VERB && println("basics")
 function f2()
     x = 2
     x = 1
+    y = x
     return x
 end
 GreenFairy.test(f2) do r
+    returns(r)
     @test r.ret_val <= Const(1)
+    @test !isbot(r.ret_val)
     @test isbot(r.thrown)
 end
 function f3(y)
@@ -26,9 +31,11 @@ function f3(y)
     x
 end
 GreenFairy.test(f3, (Ty(Int),Sign(1))) do r
+    returns(r)
     @test r.ret_val <= Sign(1)
 end
 GreenFairy.test(f3, (Ty(Int),Sign(0))) do r
+    returns(r)
     @test r.ret_val <= Sign(1)
 end
 function g2()
@@ -47,6 +54,7 @@ function g2()
     z
 end
 GreenFairy.test(g2) do r
+    returns(r)
     @test !(r.ret_val <= Sign(1))
 end
 function g3()
@@ -58,11 +66,13 @@ function g3()
     x
 end
 GreenFairy.test(g3) do r
+    returns(r)
     @test r.ret_val <= Sign(1)
 end
 # test argument declarations
 g1(x::Int) = x
 GreenFairy.test(g1, ()) do r
+    returns(r)
     @test r.ret_val <= Ty(Int)
 end
 
@@ -76,6 +86,7 @@ function f4(x)
     end
 end
 GreenFairy.test(f4, (Ty(Int),Sign(1))) do r
+    returns(r)
     @test r.ret_val <= Sign(1)
 end
 function f5(x)
@@ -86,6 +97,7 @@ function f5(x)
     end
 end
 GreenFairy.test(f5, (Ty(Int), Sign(-1))) do r
+    returns(r)
     @test r.ret_val <= Sign(-1)
 end
 GreenFairy.test(f5, (Ty(Int), Sign(1))) do r
@@ -102,6 +114,7 @@ function f6(x)
     end
 end
 GreenFairy.test(f6, Ty(Tuple{Int})) do r
+    returns(r)
     @test r.ret_val <= Ty(Tuple)
 end
 function f7(x)
@@ -114,6 +127,7 @@ end
 # the two following could be more precise
 # we need to handle _apply of unknown length better
 GreenFairy.test(f7, Ty(Tuple{Int})) do r
+    returns(r)
     #@test r.ret_val <= Ty(Tuple{Vararg{Int}})
     @test r.ret_val <= Ty(Tuple)
 end
@@ -130,6 +144,7 @@ GreenFairy.test(f8) do r
 end
 f9() = UNKNOWN ? throw(3) : 22
 GreenFairy.test(f9) do r
+    returns(r)
     @test !r.must_throw
     @test r.thrown <= Const(3)
     @test r.ret_val <= Const(22)
@@ -145,6 +160,7 @@ function f10()
     x
 end
 GreenFairy.test(f10) do r
+    returns(r)
     @test isbot(r.thrown)
     @test r.ret_val <= Const(3)
 end
@@ -163,6 +179,7 @@ function f11()
     end
 end
 GreenFairy.test(f10) do r
+    returns(r)
     @test isbot(r.thrown)
     @test r.ret_val <= Const(3)
 end
@@ -188,10 +205,13 @@ end
 
 f13() = map(y -> y + 1, [1,2,3])
 GreenFairy.test(f13) do r
+    @show r
+    returns(r)
     @test r.ret_val <= Ty(Vector{Int})
 end
 f14() = map(y -> y*1.0, [1,2,3])
 GreenFairy.test(f14) do r
+    returns(r)
     @test r.ret_val <= Ty(Union(Vector{Int},Vector{Float64})) # due to map implementation for empty array
 end
 # base implementation special case a lot of function with a runtime test
@@ -205,22 +225,27 @@ function f15()
     UNKNOWN ? imp_foldl(f,v,A) : rec_foldl(f,v,A)
 end
 GreenFairy.test(f15) do r
+    returns(r)
     @test r.ret_val <= Ty(Float64)
 end
 
 VERB && println("crashtest")
 # run on some real functions to exercise diverse control flows & stuff
 GreenFairy.test(Core.Inference.typeinf, (), (), ()) do r
+    returns(r)
     @test r.ret_val <= Ty(Tuple{Any,Any})
 end
 GreenFairy.test(GreenFairy.run, (), ()) do r
+    returns(r)
     sched_T = typeof(Analysis.make_sched(Config(:a)))
     @test r.ret_val <= Ty(Tuple{sched_T, Stats})
 end
 GreenFairy.test(*, Ty(Matrix{Float64}), Ty(Matrix{Float64})) do r
+    returns(r)
     @test r.ret_val <= Ty(Matrix{Float64})
 end
 GreenFairy.test(*, Ty(Matrix{BigFloat}), Ty(Matrix{BigFloat})) do r
+    returns(r)
     @test r.ret_val <= Ty(Matrix{BigFloat})
 end
 

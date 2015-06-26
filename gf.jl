@@ -25,7 +25,9 @@
 =#
 
 module GreenFairy
-
+const USE_UC = true
+const TOP_SYM = USE_UC ? "⊤" : "top"
+const BOT_SYM = USE_UC ? "⊥" : "bot"
 const _ELLIPS = "..."
 function show_limit(io::IO, x; limit = 80)
     buf = IOBuffer()
@@ -79,7 +81,7 @@ bot(::Type{L3}) = L3(-1 % Int8)
 isbot(x::L3) = x.v == Int8(-1)
 istop(x::L3) = x.v == Int8(1)
 <=(x::L3,y::L3) = x.v <= y.v
-Base.show(io::IO, x::L3) = print(io, istop(x) ? "top" : isbot(x) ? "bot" : "L3.e")
+Base.show(io::IO, x::L3) = print(io, istop(x) ? TOP_SYM : isbot(x) ? BOT_SYM : "L3.e")
 
 abstract TagLattice <: Lattice
 istop(x::TagLattice) = istop(x.tag)
@@ -182,8 +184,8 @@ bot(::Type{Ty}) = Ty(Union())
 istop(t::Ty) = t.ty === Any
 isbot(t::Ty) = isa(t.ty,UnionType) && length((t.ty::UnionType).types) == 0
 function Base.show(io::IO, x::Ty)
-    istop(x) && return print(io, "top")
-    isbot(x) && return print(io, "bot")
+    istop(x) && return print(io, TOP_SYM)
+    isbot(x) && return print(io, BOT_SYM)
     print(io, "ty(", x.ty, ")")
 end
 <=(x::Ty,y::Ty) = x.ty <: y.ty
@@ -217,7 +219,7 @@ function meet(x::Kind,y::Kind)
 end
 
     
-Base.show(io::IO,k::Kind) = istop(k) ? print(io, "top") : isbot(k) ? print(io, "bot") : print(io, "kind(", k.ub, ")")
+Base.show(io::IO,k::Kind) = istop(k) ? print(io, TOP_SYM) : isbot(k) ? print(io, BOT_SYM) : print(io, "kind(", k.ub, ")")
 
 
 # ========== Birth
@@ -241,42 +243,6 @@ function join(x::Birth,y::Birth)
 end
 meet(x,y) = x <= y ? x : y
 
-immutable AliasOf <: TagLattice
-    tag :: L3
-    sa :: Int
-    fn :: Symbol
-    AliasOf(tag::L3) = new(tag)
-    AliasOf(tag::L3,sa::Int,fn::Symbol) = new(tag,sa,fn)
-end
-
-top(::Type{AliasOf}) = AliasOf(top(L3))
-bot(::Type{AliasOf}) = AliasOf(bot(L3))
-AliasOf(sa::Int) = AliasOf(L3e, sa, symbol(""))
-AliasOf(sa::Int,f::Symbol) = AliasOf(L3e, sa, f)
-<=(x::AliasOf, y::AliasOf) = istop(y.tag) || isbot(x.tag) || (x.tag == y.tag == L3e && x.sa == y.sa)
-function join(x::AliasOf, y::AliasOf)
-    (istop(x) || istop(y)) && return top(AliasOf)
-    isbot(x) && return y
-    isbot(y) && return x
-    if x.sa == y.sa
-        if x.fn === y.fn
-            return x
-        else
-            return AliasOf(x.sa, symbol("*"))
-        end
-    end
-    top(AliasOf)
-end
-function meet(x::AliasOf,y::AliasOf)
-    (isbot(x) || isbot(y)) && return bot(AliasOf)
-    istop(x) && return y
-    istop(y) && return x
-    return x
-end
-
-Base.show(io::IO, x::AliasOf) = (istop(x) || isbot(x)) ? show(io, x.tag) : print(io, "alias(", x.sa, ".", x.fn, ")")
-
-
 # ========== Reduced product
 # one day we may switch back to the non-staged version if the compiler gets smart enough
 immutable Prod{Ls} <: Lattice
@@ -288,7 +254,7 @@ end
 @generated function prod{Ls}(values::Ls)
     n = length(Ls.types)
     body = []
-    names = [gensym() for i = 1:n]
+    names = Symbol[gensym() for i = 1:n]
     for i = 1:n
         push!(body, :($(names[i]) = values[$i]))
     end
@@ -307,10 +273,10 @@ end
 #top{Ls}(::Type{Prod{Ls}}) = Prod(map(T->top(T),Ls))
 #bot{Ls}(::Type{Prod{Ls}}) = Prod(map(T->bot(T),Ls))
 @generated function top{Ls}(::Type{Prod{Ls}})
-    :(Prod(tuple($([:(top($T)) for T in Ls.types]...))))
+    :(Prod(tuple($(Expr[:(top($T)) for T in Ls.types]...))))
 end
 @generated function bot{Ls}(::Type{Prod{Ls}})
-    :(Prod(tuple($([:(bot($T)) for T in Ls.types]...))))
+    :(Prod(tuple($(Expr[:(bot($T)) for T in Ls.types]...))))
 end
 #istop(x::Prod) = all(istop, x.values)
 #isbot(x::Prod) = any(isbot, x.values)
@@ -319,15 +285,15 @@ end
 
 
 function Base.show(io::IO, x::Prod)
-    istop(x) && return print(io, "top")
-    isbot(x) && return print(io, "bot")
-    print(io, "meet(")
+    istop(x) && return print(io, TOP_SYM)
+    isbot(x) && return print(io, BOT_SYM)
+    USE_UC || print(io, "meet(")
     vals = filter(v->!istop(v), x.values)
     for (i,v) in enumerate(vals)
-        i == 1 || print(io, ", ") # print(io, "∩")
+        i == 1 || print(io, USE_UC ? " ∩ " : ", ")
         print(io, v)
     end
-    print(io, ")")
+    USE_UC || print(io, ")")
 end
 
 #=function <={Ls}(x::Prod{Ls}, y::Prod{Ls})
@@ -353,7 +319,7 @@ end
     Prod(map(join, x.values, y.values))
 end=#
 @generated function join{Ls}(x::Prod{Ls},y::Prod{Ls})
-    args = [:(join(x.values[$i],y.values[$i])) for i=1:length(Ls.types)]
+    args = Expr[:(join(x.values[$i],y.values[$i])) for i=1:length(Ls.types)]
     :(Prod(tuple($(args...))))
 end
 
@@ -379,18 +345,18 @@ end
 @generated function meet{L,Ls}(x::Prod{Ls},y::L)
     L in Ls.types || error("meet " * string(x) * " : " * string(y))
     idx = findfirst(Ls.types,L)
-    args = [i == idx ? :(meet(x.values[$i],y)) : :(x.values[$i]) for i=1:length(Ls.types)]
+    args = Expr[i == idx ? :(meet(x.values[$i],y)) : :(x.values[$i]) for i=1:length(Ls.types)]
     :(prod(tuple($(args...))))
 end
 @generated function meet{Ls}(x::Prod{Ls},y::Prod{Ls})
-    args = [:(meet(x.values[$i],y.values[$i])) for i=1:length(Ls.types)]
+    args = Expr[:(meet(x.values[$i],y.values[$i])) for i=1:length(Ls.types)]
     :(prod(tuple($(args...))))
 end
 convert{L}(::Type{Prod{L}}, y::Prod{L})=y
 @generated function convert{L,Ls}(::Type{Prod{Ls}},y::L)
     L in Ls.types || error("convert : ", string(Ls), " < ", string(y))
     idx = findfirst(Ls.types,L)
-    args = [i == idx ? :y : :(top($(Ls.types[i]))) for i=1:length(Ls.types)]
+    args = Any[i == idx ? :(y) : :(top($(Ls.types[i]))) for i=1:length(Ls.types)]
     :(prod(tuple($(args...))))
 end
 
@@ -438,110 +404,13 @@ function Base.countnz(B::BitArray, upto)
     n
 end
 
-type StateCell{T}
-    val_isset :: BitVector
-    val_rle :: Vector{T}
-end
-
-StateCell{T}(::Type{T},n::Int) = StateCell(fill!(BitVector(n+1),false),Array(T,0))
-function Base.getindex{T}(s::StateCell{T}, pc)
-    idx = countnz(s.val_isset, pc)
-    v2 = if idx == 0
-        bot(T)
-    else
-        s.val_rle[idx]
-    end
-    v2
-end
-NR = 0
-export NR
-# ASSUMES NON TRIVIAL INSERT
-function Base.setindex!{T}(s::StateCell{T},v::T,pc::Int)
-    isset = s.val_isset
-    val = s.val_rle
-    self_isset = s.val_isset[pc]
-    idx = countnz(isset, pc)
-    not_last = pc < length(isset)
-    @inbounds if self_isset # already set
-        if idx == 1 && isbot(v) || idx > 1 && val[idx-1] == v # collapse into prev
-            if not_last && !isset[pc+1] # reuse current for next
-                isset[pc+1] = true
-            else
-                if not_last && isset[pc+1] && val[idx+1] == v # collapse current & next into prev
-                    isset[pc+1] = false
-                    deleteat!(val, idx+1)
-                end
-                deleteat!(val, idx)
-            end
-            isset[pc] = false
-        elseif not_last && !isset[pc+1] # preserve next
-            insert!(val, idx+1, idx > 0 ? val[idx] : bot(T))
-            val[idx] = v
-            isset[pc+1] = true
-        elseif not_last && val[idx+1] == v
-            deleteat!(val, idx)
-            isset[pc+1] = false
-        else # update in place
-            val[idx] = v
-        end
-    elseif idx == 0 && !isbot(v) || idx > 0 && val[idx] != v # need to set
-        isset[pc] = true
-        if not_last && isset[pc+1] && val[idx+1] == v # reuse next for current
-            isset[pc+1] = false
-        else
-            insert!(val, idx+1, v)
-            if not_last && !isset[pc+1] # preserve next
-                insert!(val, idx+2, idx > 0 ? val[idx] : bot(T))
-                isset[pc+1] = true
-            end
-        end
-    end
-    s
-end
-
-@inline function propagate!{T}(s::StateCell{T},pc::Int,next::Int)
-    pc > 0 || return false
-    @inbounds begin
-        next != pc+1 || s.val_isset[next] || return false
-        s_pc = s[pc]
-        s_next = s[next]
-        return if s_pc <= s_next
-            false
-        else
-            val = isbot(s_next) ? s_pc : join(s_next,s_pc)
-            if !(val <= s_next)
-                s[next] = val
-                true
-            else
-                false
-            end
-        end
-    end
-end
-function propagate!{T}(s::StateCell{T},pc::Int,next::Int,d::T)
-    s_next = s[next]
-    if d <= s_next
-        false
-    else
-        val = isbot(s_next) ? d : join(s_next,d)
-        if !(val <= s_next)
-            s[next] = val
-            true
-        else
-            false
-        end
-    end
-end
-function same_state{T}(s::StateCell{T},pc::Int,d::T)
-    d == s[pc]
-end
-
 include("mprod.jl")
 
 type LocalStore{V<:Lattice}
     local_names :: Vector{LocalName}
     defs :: Vector{DefStore{Set{Int}}}
     sa :: Vector{V}
+    phis :: Vector{Dict{Int,V}}
     nsa :: Vector{V}
     len :: Int
     code :: Code
@@ -554,7 +423,7 @@ function Base.getindex(s::LocalStore, pc)
 end
 function LocalStore{V}(::Type{V}, code::Code)
     n = length(code.body)
-    LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),V[bot(V) for i=1:n+1], V[bot(V) for i=1:code.n_sa], n, code, build_dom_tree(code), [Set{Any}() for i=1:n+1], trues(n+1))
+    LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),V[bot(V) for i=1:n+1], Array(Dict{Int,V},0), V[bot(V) for i=1:code.n_sa], n, code, build_dom_tree(code), [Set{Any}() for i=1:n+1], trues(n+1))
 end
 function fresh_sa!{V}(s::LocalStore{V})
     push!(s.nsa, bot(V))
@@ -584,6 +453,15 @@ type StateDiff{V,TV}
     must_throw :: Bool
 end
 
+function eval_def{V}(s::LocalStore{V}, local_idx, pc)
+    pc >= -length(s.nsa) || return bot(V)
+    isphi = pc in s.code.label_pc
+    if isphi
+        get(s.phis[local_idx], pc, bot(V))
+    else
+        pc > 0 ? s.sa[pc] : s.nsa[-pc]
+    end
+end
 
 function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
     d = sd.locals
@@ -591,16 +469,17 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         if !(lsd.name in s.local_names)
             push!(s.local_names, lsd.name)
             ds = DefStore(Set{Int})
-            add_def!(s.code, s.dtree, ds, 0, 0)
+            pc > 0 && add_def!(s.code, s.dtree, ds, -length(s.nsa)-1, 0)
             push!(s.defs, ds)
+            push!(s.phis, Dict{Int,V}())
         end
     end
     chgd = false
     chgd2 = false
     isphi = false
     lbl = -1
-    if next-1 in s.code.label_pc
-        lbl = find_label(s.code,next)
+    if pc in s.code.label_pc
+        lbl = find_label(s.code,pc)
     end
     
     for li = 1:length(s.local_names)
@@ -614,19 +493,18 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
 
         if lbl >= 0 && haskey(s.defs[li].phis, lbl)
             isphi = true
-            newval = Set{Int}()
-            
+            newval = eval_def(s, li, pc)
             for i in s.defs[li].phis[lbl]
-                newval = union!(newval, get(s.defs[li].vals,i,Set{Int}()))
+                newval = join(newval, eval_def(s, li, i))
             end
-            if haskey(s.defs[li].vals, next) && newval <= s.defs[li].vals[next]
+            if haskey(s.phis[li], pc) && newval <= s.phis[li][pc]
             else
-                s.defs[li].vals[next] = newval
+                s.phis[li][pc] = newval
                 chgd2 = true
             end
         end
         if idx > 0
-            chgd2 |= add_def!(s.code, s.dtree, s.defs[li], next, d[idx].saval)
+            chgd2 |= add_def!(s.code, s.dtree, s.defs[li], pc > 0 ? pc : d[idx].saval, d[idx].saval)
         end
     end
     sa = sd.sa_name
@@ -648,18 +526,15 @@ end
 function eval_local{V}(s::LocalStore{V}, pc::Int, name::LocalName)
     idx = findfirst(s.local_names, name)
     if idx == 0
-        Set{Int}()
+        bot(V)
     else
         #locval = s.locals[idx][pc]
         def = nothing
         val = nothing
         try
-            def = find_def_fast(s.code, s.dtree, s.defs[idx], pc)
             ds = s.defs[idx]
-            val = #=if (def[2]-1 in s.code.label_pc)
-                s.defs[idx].phis[find_label(s.code, def[2])]
-            else=#
-            get(ds.vals, def[2], Set{Int}())
+            def = find_def_fast(s.code, s.dtree, ds, pc)
+            val = eval_def(s, idx, def[2])#def[2] > 0 ? s.sa[def[2]] : bot(V)
             #end
             #@show vals
             #if all(vals .> 0)
@@ -827,7 +702,7 @@ function show_dict(io::IO,s)
             print(io, l)
             ntop == i || print(io, ", ")
         end
-        println(io, ntop>1?")":"", " : top")
+        println(io, ntop>1?")":"", " : ", TOP_SYM)
     end
     if nbot > 0
         print(io, "\t", nbot>1?"(":"")
@@ -838,7 +713,7 @@ function show_dict(io::IO,s)
             print(io, l)
             nbot == i || print(io, ", ")
         end
-        println(io, nbot>1?")":"", " : bot")
+        println(io, nbot>1?")":"", " : ", BOT_SYM)
     end
 end
 
@@ -1065,7 +940,7 @@ function eval_call_values!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff,
         end
 
         argtypes = to_signature(args)
-        meths = Base._methods(f,argtypes,4)
+        meths = Base._methods(f,argtypes,1)
         if meths !== false
             for meth in meths
                 cc = code_for_method(meth, argtypes)
@@ -1177,7 +1052,7 @@ end
 
 # TODO add exception info
 const INTR_TYPES = [
-                    (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float, Base.issubtype, Base.isa, Base.isdefined, Base.fpiseq, Base.fpislt]),
+                    (Bool, [Base.slt_int, Base.sle_int, Base.not_int, Base.is, Base.ne_float, Base.lt_float, Base.ule_int, Base.ult_int, Base.le_float, Base.eq_float, Base.isdefined, Base.fpiseq, Base.fpislt]),
                     (Int,[Core.sizeof]),
                     (DataType, [Base.fieldtype, Base.apply_type]),
                     (UnionType, [Base.Union]),
@@ -1205,9 +1080,9 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
         return convert(V, Ty(cty.v))
     end
     if f <= Const(Base.typeassert)
-        cty = convert(Const, args[2])
-        (istop(cty) || !isa(cty.v,Type)) && return top(V) #TODO Typevar
-        return meet(args[1],convert(V, Ty(cty.v)))
+        cty = convert(Kind, args[2])
+        istop(cty) && return top(V) #TODO Typevar
+        return meet(args[1],convert(V, cty.ub))
     end
     if  f <= Const(OtherBuiltins.new_array) ||
         f <= Const(OtherBuiltins.new_array_1d) ||
@@ -1434,8 +1309,8 @@ end
 function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
     if e in code.locals || isa(e,GenSym)
         ls = sched.states.funs[t.fc]
-        names = eval_local(ls, t.pc, e)
-        val = foldl((x,y)->join(x,eval_local(ls,t.pc,y)),bot(V),names)
+        val = eval_local(ls, t.pc, e)
+        #val = foldl((x,y)->join(x,eval_local(ls,t.pc,y)),bot(V),names)
         sd.sa_val = val
     elseif isa(e,Symbol) && isconst(code.mod,e)
         sd.sa_val = convert(V, Const(getfield(code.mod,e)))
@@ -1514,7 +1389,10 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     elseif isa(e,Expr) && e.head === :gotoifnot
         branch_pc = code.label_pc[e.args[2]::Int+1]
         sd.sa_val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
-        if sd.sa_val <= Const(true)
+        if isbot(sd.sa_val)
+            #warn("branch on bot")
+            next_pc = branch_pc = length(code.body)+1
+        elseif sd.sa_val <= Const(true)
             branch_pc = next_pc
         elseif sd.sa_val <= Const(false)
             next_pc = branch_pc
@@ -1529,7 +1407,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         for i=1:(e.args[1]::Int)
             pop!(t.eh_stack)
         end
-    elseif isa(e,Expr) && e.head in (:line,:boundscheck,:meta,:simdloop) || isa(e,LineNumberNode)
+    elseif isa(e,Expr) && e.head in (:line,:boundscheck,:meta,:simdloop) || isa(e,LineNumberNode) || isa(e,LabelNode)
     elseif isa(e,Expr)
         dump(e)
         error("unknown expr")
@@ -1547,13 +1425,12 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     sd.sa_name = t.pc
     sd.value = sd.sa_val # TODO remove this
     
-    TRACE && (print("Result of expr ");Meta.show_sexpr(e);println(" : ", sd))
+    TRACE && (print("> ");Meta.show_sexpr(e);println("  =>  ", sd.value, "\n"))
     
     could_throw = !isbot(sd.thrown)
     must_throw = sd.must_throw
     
     branch_sd = sd
-    
     if could_throw
         @assert next_pc == branch_pc == t.pc+1 # branching cannot throw
         exc_sd = LocalStateDiff(:the_exception, convert(V,sd.thrown), -1)
@@ -1612,19 +1489,7 @@ function Base.isless(t::Thread,t2::Thread)
     false
 end
 function step!(s::Scheduler)
-    #=n = length(s.threads)
-    while n > 0
-        t = s.threads[n]
-        if t.wait_on == 0
-            break
-        end
-        n -= 1
-    end=#
-    #sort!(s.threads)
-#=    if n == 0
-        n = length(s.threads)
-    end=#
-    n = 1
+    isempty(s.threads) && return (0, 0)
     t = heappop!(s.threads)
     while !isempty(s.threads)
         t2 = heappop!(s.threads)
@@ -1636,7 +1501,9 @@ function step!(s::Scheduler)
         end
     end
     k = 0
+    tpc = -1
     try
+        tpc = t.pc
         step!(s, t, s.config)
     catch x
         println("Exception while executing ", t, " :")
@@ -1657,23 +1524,26 @@ function step!(s::Scheduler)
         end
         
         isdone = isempty(same_func)
-        mincycle = isdone ? -1 : minimum([s.threads[i].cycle for i in same_func])
+        mincycle = isdone ? -1 : minimum(Int[s.threads[i].cycle for i in same_func])
         if !isdone && mincycle > t.cycle
             isdone = mincycle > s.states.finals[fc].last_cycle
         end
+        GTRACE && println("THREAD FINISHED ", s.funs[t.fc], " : ", s.states.finals[t.fc],  "================")
         if isdone
+            GTRACE && println("FUN FINISHED ", s.states.finals[t.fc])
             if !isempty(same_func)
                 deleteat!(s.threads, same_func)
                 heapify!(s.threads)
             end
             s.done[t.fc] = true
+            fill!(s.states.funs[t.fc].changed, false)
         end
-        GTRACE && println("THREAD FINISHED ", s.funs[t.fc], " : ", s.states.finals[t.fc],  "================")
     else
         heappush!(s.threads, t)
     end
+    t.fc, tpc
 end
-LIM = 1000000
+LIM = 1000
 function run(s::Scheduler; verbose = false)
     nstep = 0
     maxthread = length(s.threads)
@@ -1690,8 +1560,8 @@ end
 function Base.show(io::IO, s::Scheduler)
     println(io, "====== scheduler (", length(s.threads), " active threads, ", length(s.funs), " functions):")
     page_out = isa(io, Base.Terminals.TTYTerminal)
-    fcs = [t.fc for t in s.threads]
-    dfcs = [t.fc for t in s.done_threads]
+    fcs = Int[t.fc for t in s.threads]
+    dfcs = Int[t.fc for t in s.done_threads]
     nthr = Dict([u => length(findin(fcs,u)) for u in unique(fcs)])
     dnthr = Dict([u => length(findin(dfcs,u)) for u in unique(dfcs)])
     for (k,v) in enumerate(s.funs)
@@ -1788,7 +1658,8 @@ function capt_from_ast(ast)
         ast = Base.uncompressed_ast(ast)
     end
     capt = Array(Symbol, 0)
-    for varinfo in ast.args[2][3] # captured
+    for varinfo in ast.args[2][2] # captured
+#        @show varinfo
         name = varinfo[1]
         push!(capt, name)
     end
@@ -1817,7 +1688,11 @@ function code_from_ast(linf,tenv,sig::ANY)
     
     # TODO ask Jeff if this is the easiest way to sort out this mess
     # probably not
-    locs = Set{LocalName}(ast.args[2][1])
+    locs = Set{LocalName}()
+    for loc in ast.args[2][1]
+#        @show loc
+        push!(locs, loc[1])
+    end
     isva = false
     args = map(ast.args[1]) do a
         if isa(a, Expr) && a.head === :(::) # TODO ugh
@@ -1900,20 +1775,6 @@ targ_sa(code::Code, i::Int) = -code.targ_sa[i]
 
 const _staged_cache = ObjectIdDict()#Dict{Any,Any}()
 
-function displayfun(s::Scheduler, fc::Int)
-    b = IOBuffer()
-    code = s.funs[fc]
-    @printf(b, "<table>")
-    for pc = 1:length(code.body)
-        @printf(b, "<tr>")
-        @printf(b, "<td>")
-        Meta.show_sexpr(b, code.body[pc])
-        @printf(b, "</td></tr>")
-    end
-    @printf(b, "</table>")
-    seekstart(b)
-    display("text/html", readall(b))
-end
 
 function print_code(io, sched, fc)
     c = sched.funs[fc]
@@ -1931,7 +1792,7 @@ function print_code(io, sched, fc)
 end
 print_code(sched,fc) = print_code(STDOUT,sched,fc)
 
-export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,ExprVal,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice, AliasOf, Config,Stats,Analysis
+export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,ExprVal,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice, Config,Stats,Analysis
 
 # == client
 
@@ -1962,6 +1823,22 @@ function Base.show(io::IO, s::Stats)
         @printf(io, "\t%d iterations\n", niter)
     end
     @printf(io, "\t%.2f Kit/s\n", (niter/1000)/dt)
+end
+
+function init(f::Function, args)
+    global LAST_SC
+    sched = LAST_SC = Analysis.make_sched(Config(:always))
+    args = map(args) do a
+        if isa(a,Tuple)
+            foldl(meet, top(Analysis.ValueT), a)
+        else
+            convert(Analysis.ValueT, a)
+        end
+    end
+    empty!(_code_cache)
+    t = Thread(0,0)
+    eval_call_values!(sched, t, StateDiff(t,Analysis.ValueT,Ty), convert(Analysis.ValueT,Const(f)), Analysis.ValueT[args...])
+    sched
 end
 
 function run(f::Function, args)
