@@ -474,49 +474,44 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         end
     end
     chgd = false
-    chgd2 = false
-    isphi = false
-    lbl = -1
-    if pc in s.code.label_pc
-        lbl = find_label(s.code,pc)
-        @assert lbl == findfirst(s.code.label_pc, pc)
+
+    # update phis
+    lbl = findfirst(s.code.label_pc, pc)
+    if lbl > 0
+        for li = 1:length(s.local_names)
+            k = s.local_names[li]
+            # TODO only join the changed incoming edges
+            if haskey(s.defs[li].phis, lbl)
+                newval = eval_def(s, li, pc)
+                for i in s.defs[li].phis[lbl]
+                    newval = join(newval, eval_def(s, li, i))
+                end
+                if haskey(s.phis[li], pc) && newval <= s.phis[li][pc]
+                else
+                    s.phis[li][pc] = newval
+                    chgd = true
+                end
+            end
+        end
     end
     
-    for li = 1:length(s.local_names)
-        k = s.local_names[li]
-        idx = 0
-        for j=1:length(d)
-            if d[j].name === k
-                idx = j
-            end
-        end
-
-        if lbl >= 0 && haskey(s.defs[li].phis, lbl)
-            isphi = true
-            newval = eval_def(s, li, pc)
-            for i in s.defs[li].phis[lbl]
-                newval = join(newval, eval_def(s, li, i))
-            end
-            if haskey(s.phis[li], pc) && newval <= s.phis[li][pc]
-            else
-                s.phis[li][pc] = newval
-                chgd2 = true
-            end
-        end
-        if idx > 0
-            chgd2 |= add_def!(s.code, s.dtree, s.defs[li], pc > 0 ? pc : d[idx].saval, d[idx].saval)
-        end
+    # do defs
+    for idx = 1:length(d)
+        li = findfirst(s.local_names, d[idx].name)
+        @assert li > 0
+        chgd |= add_def!(s.code, s.dtree, s.defs[li], pc > 0 ? pc : d[idx].saval, d[idx].saval)
     end
+    
     sa = sd.sa_name
     if sa > 0
         val = s.sa[sa]
         if !(sd.value <= val)
             s.sa[sa] = join(sd.value, val)
-            chgd = chgd2 = true
+            chgd = true
         end
     end
 
-    if chgd2
+    if chgd
         fill!(s.changed, true)
     else
         pc > 0 && (s.changed[pc] = false)
@@ -528,7 +523,6 @@ function eval_local{V}(s::LocalStore{V}, pc::Int, name::LocalName)
     if idx == 0
         bot(V)
     else
-        #locval = s.locals[idx][pc]
         def = nothing
         val = nothing
         try
@@ -1336,7 +1330,7 @@ end
 function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     TRACE = GTRACE
     code = sched.funs[t.fc]
-    sd = StateDiff(t,V,V)#Array(LocalStateDiff{V}, 0)
+    sd = StateDiff(t,V,V)
     
     TRACE && println("Step thread ",t.fc, ":", t.pc)
     next_pc = branch_pc = t.pc+1
@@ -1428,7 +1422,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     end
     sd.sa_name = t.pc
     
-    TRACE && (print("> ");Meta.show_sexpr(e);println("  =>  ", sd.value, "\n"))
+    TRACE && (print("> ");Meta.show_sexpr(e);println("  →  ", sd.value, "\n"))
     
     could_throw = !isbot(sd.thrown)
     must_throw = sd.must_throw
