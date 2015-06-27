@@ -415,7 +415,7 @@ type LocalStore{V<:Lattice}
     len :: Int
     code :: Code
     dtree :: DomTree
-    heap :: Vector{Set{Any}}
+    heap :: Vector{Set{Set{Any}}}
     changed :: BitVector
 end
 function Base.getindex(s::LocalStore, pc)
@@ -423,7 +423,7 @@ function Base.getindex(s::LocalStore, pc)
 end
 function LocalStore{V}(::Type{V}, code::Code)
     n = length(code.body)
-    LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),V[bot(V) for i=1:n+1], Array(Dict{Int,V},0), V[bot(V) for i=1:code.n_sa], n, code, build_dom_tree(code), [Set{Any}() for i=1:n+1], trues(n+1))
+    LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),V[bot(V) for i=1:n+1], Array(Dict{Int,V},0), V[bot(V) for i=1:code.n_sa], n, code, build_dom_tree(code), [Set{Set{Any}}() for i=1:n+1], trues(n+1))
 end
 function fresh_sa!{V}(s::LocalStore{V})
     push!(s.nsa, bot(V))
@@ -446,7 +446,6 @@ type StateDiff{V,TV}
     t::Thread
     locals :: Vector{LocalStateDiff{V}}
     sa_name :: Int
-    sa_val :: V
     lost :: Vector{Int}
     value :: V
     thrown :: TV
@@ -480,6 +479,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
     lbl = -1
     if pc in s.code.label_pc
         lbl = find_label(s.code,pc)
+        @assert lbl == findfirst(s.code.label_pc, pc)
     end
     
     for li = 1:length(s.local_names)
@@ -510,8 +510,8 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
     sa = sd.sa_name
     if sa > 0
         val = s.sa[sa]
-        if !(sd.sa_val <= val)
-            s.sa[sa] = join(sd.sa_val, val)
+        if !(sd.value <= val)
+            s.sa[sa] = join(sd.value, val)
             chgd = chgd2 = true
         end
     end
@@ -892,7 +892,7 @@ function eval_call!{V,S}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::I
         stack[i] = eval_local(sched.states,t.fc,t.pc,args[i])
     end
     f = eval_local(sched.states,t.fc,t.pc,fun)
-    sd.sa_val = eval_call_values!(sched, t, sd, f, stack)
+    sd.value = eval_call_values!(sched, t, sd, f, stack)
 end
 
 function eval_call_values!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V, args::Vector{V})
@@ -986,7 +986,7 @@ end
 
 function eval_new!{V}(sched::Scheduler, t::Thread, sd::StateDiff, args::V...)
     any(isbot, args) && return bot(V)
-    sd.sa_val = eval_call_values!(sched, t, sd, V, meet(top(V), Const(OtherBuiltins.new)), collect(args))
+    sd.value = eval_call_values!(sched, t, sd, V, meet(top(V), Const(OtherBuiltins.new)), collect(args))
 end
 
 @generated function eval_call_values!{Ls}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Prod{Ls}}, f::Prod{Ls}, args::Vector{Prod{Ls}})
@@ -1299,7 +1299,7 @@ end
 function eval_assign!{V}(sched,sd,code,name,res::V,saval::Int)
     if name in code.locals || isa(name,GenSym)
         push!(sd.locals, LocalStateDiff(name, res, saval))
-        sd.sa_val = res
+        sd.value = res
     else
         # TODO unknown effects
     end
@@ -1311,17 +1311,17 @@ function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
         ls = sched.states.funs[t.fc]
         val = eval_local(ls, t.pc, e)
         #val = foldl((x,y)->join(x,eval_local(ls,t.pc,y)),bot(V),names)
-        sd.sa_val = val
+        sd.value = val
     elseif isa(e,Symbol) && isconst(code.mod,e)
-        sd.sa_val = convert(V, Const(getfield(code.mod,e)))
+        sd.value = convert(V, Const(getfield(code.mod,e)))
     else
         may_throw!(sd, Ty(UndefVarError))
-        sd.sa_val = top(V) # global
+        sd.value = top(V) # global
     end
 end
-StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, bot(LV), Array(Int,0), bot(LV), bot(TV), false)
+StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false)
 function Base.copy{V,TV}(sd::StateDiff{V,TV})
-    StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, sd.sa_val, copy(sd.lost), sd.value, sd.thrown, sd.must_throw)
+    StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw)
 end
 
 function may_throw!(sd :: StateDiff, v)
@@ -1366,8 +1366,8 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         else
             may_throw!(sd, final.thrown)
         end
-        sd.sa_val = final.ret_val
-        if isbot(sd.sa_val)
+        sd.value = final.ret_val
+        if isbot(sd.value)
             #println("returned bot in $(t.fc) $code :")
             #show_dict(STDOUT, sched.states[t.fc,1])
         end
@@ -1381,24 +1381,24 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         end
     elseif isa(e, LocalName)
         if e === :UNKNOWN
-            sd.sa_val = top(V)
+            sd.value = top(V)
         else
             eval_sym!(sched, t, sd, code, e)
         end
     elseif isa(e,Expr) && e.head === :return
-        sd.sa_val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
+        sd.value = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
         next_pc = branch_pc = length(code.body)+1
     elseif isa(e,GotoNode)
         next_pc = branch_pc = code.label_pc[e.label::Int+1]
     elseif isa(e,Expr) && e.head === :gotoifnot
         branch_pc = code.label_pc[e.args[2]::Int+1]
-        sd.sa_val = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
-        if isbot(sd.sa_val)
+        sd.value = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
+        if isbot(sd.value)
             #warn("branch on bot")
             next_pc = branch_pc = length(code.body)+1
-        elseif sd.sa_val <= Const(true)
+        elseif sd.value <= Const(true)
             branch_pc = next_pc
-        elseif sd.sa_val <= Const(false)
+        elseif sd.value <= Const(false)
             next_pc = branch_pc
         end
     elseif isa(e,Expr) && e.head === :(=)
@@ -1421,13 +1421,12 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         elseif isa(e, QuoteNode)
             e = e.value
         end
-        sd.sa_val = convert(V,Const(e))
+        sd.value = convert(V,Const(e))
     end
     if !isempty(t.wait_on)
         return
     end
     sd.sa_name = t.pc
-    sd.value = sd.sa_val # TODO remove this
     
     TRACE && (print("> ");Meta.show_sexpr(e);println("  =>  ", sd.value, "\n"))
     
