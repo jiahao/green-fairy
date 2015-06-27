@@ -230,6 +230,7 @@ GreenFairy.test(f15) do r
 end
 
 VERB && println("crashtest")
+if Base.GIT_VERSION_INFO.branch == "ob/goodbye-type_goto" # avoid type_goto
 # run on some real functions to exercise diverse control flows & stuff
 GreenFairy.test(Core.Inference.typeinf, (), (), ()) do r
     returns(r)
@@ -247,6 +248,7 @@ end
 GreenFairy.test(*, Ty(Matrix{BigFloat}), Ty(Matrix{BigFloat})) do r
     returns(r)
     @test r.ret_val <= Ty(Matrix{BigFloat})
+end
 end
 
 VERB && GreenFairy.end_test()
