@@ -1,0 +1,10 @@
+language: julia
+os:
+    - osx
+    - linux
+julia:
+    - nightly
+notifications:
+    email: false
+script:
+    - make test
