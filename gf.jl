@@ -57,10 +57,6 @@ type Code
     tvar_mapping
     capt :: Vector{Symbol}
     decl_types :: Dict{LocalName,Any}
-    arg_sa :: UnitRange{Int}
-    capt_sa :: UnitRange{Int}
-    targ_sa :: UnitRange{Int}
-    n_sa :: Int
 end
 
 import Base.convert
@@ -411,7 +407,6 @@ type LocalStore{V<:Lattice}
     defs :: Vector{DefStore{Set{Int}}}
     sa :: Vector{V}
     phis :: Vector{Dict{Int,V}}
-    nsa :: Vector{V}
     len :: Int
     code :: Code
     dtree :: DomTree
@@ -423,11 +418,7 @@ function Base.getindex(s::LocalStore, pc)
 end
 function LocalStore{V}(::Type{V}, code::Code)
     n = length(code.body)
-    LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),V[bot(V) for i=1:n+1], Array(Dict{Int,V},0), V[bot(V) for i=1:code.n_sa], n, code, build_dom_tree(code), [Set{Set{Any}}() for i=1:n+1], trues(n+1))
-end
-function fresh_sa!{V}(s::LocalStore{V})
-    push!(s.nsa, bot(V))
-    return -length(s.nsa)
+    LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),V[bot(V) for i=1:n+1], Array(Dict{Int,V},0), n, code, build_dom_tree(code), [Set{Set{Any}}() for i=1:n+1], trues(n+1))
 end
 type Thread
     fc :: Int
@@ -450,31 +441,35 @@ type StateDiff{V,TV}
     value :: V
     thrown :: TV
     must_throw :: Bool
+    heap_use
 end
 
 function eval_def{V}(s::LocalStore{V}, local_idx, pc)
-    pc >= -length(s.nsa) || return bot(V)
-    isphi = pc in s.code.label_pc
+    isphi = pc == 0 || (pc in s.code.label_pc)
     if isphi
         get(s.phis[local_idx], pc, bot(V))
     else
-        pc > 0 ? s.sa[pc] : s.nsa[-pc]
+        s.sa[pc]
     end
 end
 
+function add_local!{V}(s::LocalStore{V}, name)
+    push!(s.local_names, name)
+    ds = DefStore(Set{Int})
+    add_def!(s.code, s.dtree, ds, 0, 0)
+    push!(s.defs, ds)
+    push!(s.phis, Dict{Int,V}())
+    length(s.local_names)
+end
+
 function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
+    chgd = false
     d = sd.locals
     for lsd in d
         if !(lsd.name in s.local_names)
-            push!(s.local_names, lsd.name)
-            ds = DefStore(Set{Int})
-            pc > 0 && add_def!(s.code, s.dtree, ds, -length(s.nsa)-1, 0)
-            push!(s.defs, ds)
-            push!(s.phis, Dict{Int,V}())
+            add_local!(s, lsd.name)
         end
     end
-    chgd = false
-
     # update phis
     lbl = findfirst(s.code.label_pc, pc)
     if lbl > 0
@@ -501,6 +496,43 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         @assert li > 0
         chgd |= add_def!(s.code, s.dtree, s.defs[li], pc > 0 ? pc : d[idx].saval, d[idx].saval)
     end
+    if pc > 0
+    for obj in s.heap[pc]
+        nobj = copy(obj)
+        
+        if sd.sa_name in nobj
+            pop!(nobj, sd.sa_name)
+        end
+        if sd.heap_use in nobj
+            push!(nobj, sd.sa_name)
+        end
+        for idx = 1:length(d)
+            name = d[idx].name
+            li = findfirst(s.local_names, name)
+            @assert li > 0
+            def = find_def_fast(s.code, s.dtree, s.defs[li], pc)[2]
+            heap_def = name#(name, def)
+            if heap_def in nobj
+                pop!(nobj, heap_def)
+            end
+            if d[idx].saval in nobj
+                push!(nobj, heap_def)
+            end
+        end
+        if !(nobj in s.heap[next])
+            push!(s.heap[next], nobj)
+            chgd = true
+        end
+    end
+        if sd.heap_use === :new
+            obj = Set{Any}([sd.sa_name])
+            if !(obj in s.heap[next])
+                push!(s.heap[next], obj)
+                chgd = true
+            end
+        end
+        
+    end
     
     sa = sd.sa_name
     if sa > 0
@@ -518,7 +550,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
     end
     s.changed[next]
 end
-function eval_local{V}(s::LocalStore{V}, pc::Int, name::LocalName)
+function eval_local!{V}(s::LocalStore{V}, sd, pc::Int, name::LocalName)
     idx = findfirst(s.local_names, name)
     if idx == 0
         bot(V)
@@ -528,6 +560,8 @@ function eval_local{V}(s::LocalStore{V}, pc::Int, name::LocalName)
         try
             ds = s.defs[idx]
             def = find_def_fast(s.code, s.dtree, ds, pc)
+            #println("Before def $name : $def $(sd.heap_use) at $pc")
+            sd.heap_use = name#(name, def[2])
             val = eval_def(s, idx, def[2])#def[2] > 0 ? s.sa[def[2]] : bot(V)
             #end
             #@show vals
@@ -560,29 +594,62 @@ function eval_local{V}(s::LocalStore{V}, pc::Int, name::Int)
     if name > 0
         s.sa[name]
     elseif name < 0
-        s.nsa[-name]
+        error("negative name")
     else
         bot(V)
     end
 end
 
-function same_state(s::LocalStore, prelude)
-    for i=1:length(prelude)
-        s.nsa[i] == prelude[i] || return false
-    end
-    true
-end
-immutable State{LV,FinalT}
+immutable State{LV,InitT,FinalT}
+    initials :: Vector{InitT}
     funs :: Vector{LocalStore{LV}} # TODO better name
     finals :: Vector{FinalT}
     lost :: Vector{Set{Int}}
 end
-State{V,FinalT}(::Type{V},::Type{FinalT}) = State{V,FinalT}(Array(LocalStore{V}, 0), Array(FinalT,0), Array(Set{Int}, 0))
-function ensure_filled!{V,F}(s::State{V,F}, fc::Int, code::Code)
+State{V,InitT,FinalT}(::Type{V},::Type{InitT},::Type{FinalT}) = State{V,InitT,FinalT}(Array(InitT,0), Array(LocalStore{V}, 0), Array(FinalT,0), Array(Set{Int}, 0))
+immutable InitialState{V} <: Lattice
+    args :: Vector{V}
+    capt :: Vector{V}
+    tenv :: Vector{V}
+end
+function <={V}(s1::InitialState{V},s2::InitialState{V})
+    length(s1.args) == length(s2.args) &&
+    length(s1.capt) == length(s2.capt) &&
+    length(s1.tenv) == length(s2.tenv) || return false
+
+    for (a1,a2) in ((s1.args,s2.args), (s1.capt,s2.capt), (s1.tenv, s2.tenv))
+        for (v1,v2) in zip(a1,a2)
+            v1 <= v2 || return false
+        end
+    end
+    true
+end
+function ensure_filled!{V,I,F}(s::State{V,I,F}, fc::Int, code::Code, initial::InitialState)
+    push!(s.initials, initial)
     push!(s.funs, LocalStore(V, code))
     push!(s.finals, bot(F))
     push!(s.lost, Set{Int}())
+    @assert fc == length(s.initials) == length(s.funs) == length(s.finals) == length(s.lost)
+    apply_initial!(s, initial, fc, code)
 end
+
+function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
+    @assert length(is.args) == length(code.args)
+    ls = s.funs[fc]
+    for i = 1:length(is.args)
+        li = add_local!(ls, code.args[i])
+        ls.phis[li][0] = is.args[i]
+    end
+    for i = 1:length(is.capt)
+        li = add_local!(ls, code.capt[i])
+        ls.phis[li][0] = is.capt[i]
+    end
+    for i = 1:length(is.tenv)
+        li = add_local!(ls, code.tvar_mapping[2*i-1].name)
+        ls.phis[li][0] = is.tenv[i]
+    end
+end
+
 eval_local(s::State, fc::Int, pc::Int, name) = eval_local(s.funs[fc], pc, name)
 function propagate!{V,LV}(s::State,fc::Int,pc::Int,next::Int,sd::StateDiff{V,LV})
     chgd = false
@@ -590,23 +657,27 @@ function propagate!{V,LV}(s::State,fc::Int,pc::Int,next::Int,sd::StateDiff{V,LV}
     l = length(s.lost[fc])
     union!(s.lost[fc], sd.lost)
     chgd |= (l != length(s.lost[fc]))
-    
+    chgd |= propagate!(s.funs[fc],pc,next,sd)
     if next == s.funs[fc].len+1
         chgd |= propagate!(s,s.finals[fc],fc,pc,sd)
     end
-    chgd |= propagate!(s.funs[fc],pc,next,sd)
     chgd
 end
-
+InitialState{V}(::Type{V}, code::Code) =
+    InitialState(V[bot(V) for i = 1:length(code.args)],
+                 V[bot(V) for i = 1:length(code.capt)],
+                 V[bot(V) for i = 1:div(length(code.tvar_mapping), 2)])
 type FinalState{V} <: Lattice
     ret_val :: V
+    ret_sa :: Set{Int}
     thrown :: V
     must_throw :: Bool
+    heap :: Set{Set{Any}}
     last_cycle :: Int
 end
-bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),bot(V),true,0)
+bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),Set{Int}(),bot(V),true,Set{Set{Any}}(),0)
 function Base.show(io::IO, s::FinalState)
-    print(io, "(returned: ", s.ret_val)
+    print(io, "(returned: ", s.ret_val, " [", Base.join(collect(s.ret_sa), ","), "] ")
     if !isbot(s.thrown)
         print(io, ", ", s.must_throw ? "must" : "may", " throw ", s.thrown)
     end
@@ -618,6 +689,9 @@ function join!{V}(f::FinalState{V}, g::FinalState{V})
     f.thrown = join(f.thrown, g.thrown)
     f.must_throw = f.must_throw & g.must_throw
     f.last_cycle = max(f.last_cycle, g.last_cycle)
+    union!(f.ret_sa, g.ret_sa)
+    union!(f.heap, g.heap)
+    nothing
 end
 
 function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
@@ -634,13 +708,28 @@ function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
         fs.must_throw &= sd.must_throw
         chgd = true
     end
+    l = length(fs.ret_sa)
+    push!(fs.ret_sa, s.funs[fc].len+1) # TODO not sure about pc in general (exceptions ?)
+    if l != length(fs.ret_sa)
+        chgd = true
+    end
+    ls = s.funs[fc]
+    code = ls.code
+    return_gate = Set{Any}([symbol("__arg_$i") for i=1:length(code.args)])
+    union!(return_gate, fs.ret_sa)
+    #@show return_gate ls.heap[pc]
+    for obj in ls.heap[pc]
+        obj = intersect(obj, return_gate)
+        if !(obj in fs.heap)
+            push!(fs.heap, obj)
+            chgd = true
+        end
+    end
+    
     if chgd
         fs.last_cycle = sd.t.cycle+1
     end
     chgd
-end
-function same_state(s::State, fc::Int, prelude)
-    same_state(s.funs[fc], prelude)
 end
 function Base.getindex(s::State, fc::Int, pc::Int)
     s.funs[fc][pc]
@@ -657,10 +746,10 @@ type Scheduler{ValueT,StateT}
     funs :: Vector{Code}
 end
 
-function register_fun!(sched::Scheduler, fcode::Code)
+function register_fun!(sched::Scheduler, fcode::Code, initial::InitialState)
     push!(sched.funs, fcode)
     fc = length(sched.funs)
-    ensure_filled!(sched.states, fc, fcode)
+    ensure_filled!(sched.states, fc, fcode, initial)
     push!(sched.done, false)
     push!(sched.called_by, Set{Any}())
     fc
@@ -796,11 +885,7 @@ NOMETH = 0
 function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector{V},env)
     child = Thread(0,1)
     args = map(call_gate, args)
-    if any(istop, args)
-        #                println("Calling gf ", fv, " ", argt, " with args ", args)
-        #                println(sched)
-        #                exit()
-    end
+    initial = InitialState(V, fcode)
     narg = length(fcode.args)
     if fcode.isva
         narg -= 1
@@ -811,7 +896,6 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         DEBUGWARN && warn(@sprintf("Wrong arg count for %s : %s vs %s%s", fcode, fcode.args, args, fcode.isva ? " (vararg)" : ""))
         return
     end
-    prelude_sa = Array(V, fcode.n_sa)
     sd = StateDiff(child,V,V)
     for i = 1:narg
         argname = fcode.args[i]
@@ -825,14 +909,12 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
                 arg = meet(arg, convert(V,Ty(declty)))
             end
         end
-        prelude_sa[-arg_sa(fcode,i)] = arg
-        eval_assign!(sched, sd, fcode, argname, bot(V), arg_sa(fcode, i))
+        initial.args[i] = arg
     end
     if fcode.isva
         tup = eval_call_values!(sched, child, sd, convert(V,Const(Base.tuple)), vargs)
         @assert tup !== nothing
-        eval_assign!(sched, sd, fcode, fcode.args[end], bot(V), arg_sa(fcode, narg+1))
-        prelude_sa[-arg_sa(fcode,narg+1)] = tup
+        initial.args[narg+1] = tup
     end
     for i=1:2:length(fcode.tvar_mapping)
         tv = fcode.tvar_mapping[i]
@@ -842,20 +924,19 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         else
             convert(V,Const(tval))
         end
-        eval_assign!(sched, sd, fcode, tv.name, bot(V), targ_sa(fcode, div(i+1,2)))
-        prelude_sa[-targ_sa(fcode,div(i+1,2))] = aval
+        initial.tenv[div(i+1,2)] = aval
     end
-    length(env) == length(fcode.capt) || DEBUGWARN && warn(@sprintf("Wrong env size %d vs %d : %s vs %s", length(env), length(fcode.capt), env, fcode.capt))
+    length(env) == length(fcode.capt) || warn(@sprintf("Wrong env size %d vs %d : %s vs %s", length(env), length(fcode.capt), env, fcode.capt))
     for i=1:length(fcode.capt)
-        eval_assign!(sched, sd, fcode, fcode.capt[i], bot(V), capt_sa(fcode, i))
-        prelude_sa[-capt_sa(fcode,i)] = i > length(env) ? top(V) : convert(V,env[i])
+        val = i > length(env) ? top(V) : convert(V,env[i])
+        initial.capt[i] = val
     end
-    
+
+    # check for cached version of this call
     fc = 0
     for fc2 in 1:length(sched.funs)
         if sched.funs[fc2] === fcode
-            @assert sd.sa_name == -1
-            if same_state(sched.states, fc2, prelude_sa)
+            if sched.states.initials[fc2] == initial
                 fc = fc2
                 break
             else
@@ -863,15 +944,11 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         end
     end
     if fc == 0
-        fc = register_fun!(sched, fcode)
+        fc = register_fun!(sched, fcode, initial)
     end
     
     child.fc = fc
     
-    for i=1:length(prelude_sa)
-        sched.states.funs[fc].nsa[i] = prelude_sa[i]
-    end
-    propagate!(sched.states, fc, 0, 1, sd)
     heappush!(sched.threads, child)
 
     push!(t.wait_on, fc)
@@ -1270,6 +1347,7 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
         f <= Const(OtherBuiltins.new_array_1d) ||
         f <= Const(OtherBuiltins.new_array_2d) ||
         f <= Const(OtherBuiltins.new_array_3d)
+        sd.heap_use = :new
         return convert(V,Birth(t.fc,t.pc))
     end
     top(V)
@@ -1303,8 +1381,7 @@ end
 function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
     if e in code.locals || isa(e,GenSym)
         ls = sched.states.funs[t.fc]
-        val = eval_local(ls, t.pc, e)
-        #val = foldl((x,y)->join(x,eval_local(ls,t.pc,y)),bot(V),names)
+        val = eval_local!(ls, sd, t.pc, e)
         sd.value = val
     elseif isa(e,Symbol) && isconst(code.mod,e)
         sd.value = convert(V, Const(getfield(code.mod,e)))
@@ -1313,9 +1390,9 @@ function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
         sd.value = top(V) # global
     end
 end
-StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false)
+StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, :bla)
 function Base.copy{V,TV}(sd::StateDiff{V,TV})
-    StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw)
+    StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw, sd.heap_use)
 end
 
 function may_throw!(sd :: StateDiff, v)
@@ -1361,10 +1438,16 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             may_throw!(sd, final.thrown)
         end
         sd.value = final.ret_val
+#        sd.heap_use = 
         if isbot(sd.value)
             #println("returned bot in $(t.fc) $code :")
             #show_dict(STDOUT, sched.states[t.fc,1])
         end
+        #println("Returned heap : $(final.heap) from")
+        #=for obj in final.heap
+            if !isempty(intersect(final.ret_sa, obj))
+                sd.heap_use = 
+        end=#
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
         args = code.call_args[t.pc]
         if e.head === :new
@@ -1381,6 +1464,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         end
     elseif isa(e,Expr) && e.head === :return
         sd.value = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
+        sd.heap_use = code.call_args[t.pc]
         next_pc = branch_pc = length(code.body)+1
     elseif isa(e,GotoNode)
         next_pc = branch_pc = code.label_pc[e.label::Int+1]
@@ -1713,15 +1797,12 @@ function code_from_ast(linf,tenv,sig::ANY)
         isva && argn==length(args) && (ty = Tuple{Vararg{ty}})
         decltypes[args[argn]] = eval_typ_in(ty, tenv)
     end
-    arg_sa = 1:length(args)
     if isva
         decltypes[args[end]] = Tuple{sigtypes[end]}
     end
     capt = capt_from_ast(ast)
     union!(locs,args)
     union!(locs,capt)
-    capt_sa = (1:length(capt)) + length(args)
-    targ_sa = (1:div(length(tenv),2)) + length(capt) + length(args)
     push!(locs, :the_exception, :UNKNOWN) #TODO ugh
 
     label_pc = Array(Int, 0)
@@ -1758,17 +1839,13 @@ function code_from_ast(linf,tenv,sig::ANY)
     HIT[2] += length(locs)
     HIT[3] += length(sa)
 
-    c = Code(mod, fun_name, body, args_pc, label_pc, locs, args, isva, tenv, capt, decltypes, arg_sa, capt_sa, targ_sa, length(args) + length(capt) + div(length(tenv),2))
+    c = Code(mod, fun_name, body, args_pc, label_pc, locs, args, isva, tenv, capt, decltypes)
     for i=1:2:length(tenv)
         push!(c.locals, tenv[i].name)
     end
     _code_cache[key] = c
     c
 end
-
-arg_sa(code::Code, i::Int) = -code.arg_sa[i]
-capt_sa(code::Code, i::Int) = -code.capt_sa[i]
-targ_sa(code::Code, i::Int) = -code.targ_sa[i]
 
 const _staged_cache = ObjectIdDict()#Dict{Any,Any}()
 
@@ -1781,6 +1858,14 @@ function print_code(io, sched, fc)
         Meta.show_sexpr(io, c.body[i])
         print(io, " \t")
         print(io, ls.sa[i])
+        print(io, "\t[")
+        for obj in ls.heap[i]
+            for var in obj
+                print(io, var, " ")
+            end
+            print(io, ", ")
+        end
+        print(io, "]")
               #=for li in 1:length(ls.locals)
             ls.
         end=#
@@ -1789,7 +1874,7 @@ function print_code(io, sched, fc)
 end
 print_code(sched,fc) = print_code(STDOUT,sched,fc)
 
-export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,ExprVal,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice, Config,Stats,Analysis
+export Prod,Sign,Const,Ty,Birth,Thread,FunctionState,Scheduler,Code,ExprVal,FinalState,ConstCode,LocalStore,State, isbot, istop, Kind, Lattice, Config,Stats,Analysis,InitialState
 
 # == client
 
@@ -1799,13 +1884,15 @@ const ValueTup = (Const,Ty,Kind,Sign,Birth,ConstCode{Ty})
 const ValueT = Prod{Tuple{ValueTup...}}
 const (MValueT,CellT) = GreenFairy.make_mprod(ValueTup)
 const FinalT = FinalState{ValueT}
-make_sched(conf) = Scheduler{ValueT,State{ValueT,FinalT}}(State(ValueT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
+const InitT = InitialState{ValueT}
+make_sched(conf) = Scheduler{ValueT,State{ValueT,InitT,FinalT}}(State(ValueT,InitT,FinalT),Array(Bool,0),Array(Thread,0),Array(Thread,0),conf,Array(Set{Any},0),Array(Code,0))
 end
 
 immutable Stats
     n_iteration
     max_concurrent_threads
     total_time
+    n_funs
 end
 
 function Base.show(io::IO, s::Stats)
@@ -1820,6 +1907,7 @@ function Base.show(io::IO, s::Stats)
         @printf(io, "\t%d iterations\n", niter)
     end
     @printf(io, "\t%.2f Kit/s\n", (niter/1000)/dt)
+    @printf(io, "\t%d functions interpreted", s.n_funs)
 end
 
 function init(f::Function, args)
@@ -1854,7 +1942,7 @@ function run(f::Function, args)
     dt = @elapsed begin
         niter,maxthr = run(sched)
     end
-    sched, Stats(niter, maxthr, dt)
+    sched, Stats(niter, maxthr, dt, length(sched.funs))
 end
 global ntests
 function start_test()
@@ -1866,7 +1954,7 @@ function test(after::Function, f::Function, args...)
     s, stats = run(f, args)
     after(s.states.finals[1])
     @show stats
-    @show s.states.finals[1].ret_val
+    #@show s.states.finals[1].ret_val
     ntests += 1
 end
 function end_test()

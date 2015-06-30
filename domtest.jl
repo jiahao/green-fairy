@@ -110,7 +110,7 @@ function test_dt(F, A, N=[])
 end
 
 function allfuns(m,dm = Set{Any}())
-    nlabel = Int[]
+    nlabel = Tuple{Int,Int}[]
     fs = []
     push!(dm,m)
     for name in names(m, true, true)
@@ -123,9 +123,12 @@ function allfuns(m,dm = Set{Any}())
             d = f.env.defs
             while isa(d,Method)
                 ast = Base.uncompressed_ast(d.func.code)
-                c = count(e->isa(e,LabelNode), ast.args[3].args)
-                push!(nlabel, c)
-                push!(fs, d)
+                c = count(e->isa(e,Expr) && e.head == :line, ast.args[3].args)
+                c2 = count(e->isa(e,LineNumberNode), ast.args[3].args)
+                if c == 0 && c2 == 0
+                    push!(nlabel, (c,c2))
+                    push!(fs, d)
+                end
                 @label endl
                 d = d.next
             end
