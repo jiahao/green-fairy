@@ -1,16 +1,12 @@
 #= TODO
 
-- dispatch
-  - make dispatch pluggable with abstract values (ConstCode & Ty)
-    (then add uncertain matches)
-  - unify generic & anonymous call path (and support capt. vars in generic code)
-
-- find a common interface for mutable state (Final,Thread,...)
-
 - make the canonicalized ccall homogenous
 - figure out what to do with :& arguments
 
 - support kwcall
+
+- support topmod !== Base
+
 
 - exceptions :
   - use jl_rethrow instead of Base.rethrow
@@ -49,7 +45,7 @@ type Code
     mod :: Module
     name :: Symbol
     body :: Vector{Any}
-    call_args :: Vector{Tuple{Vararg{Int}}}
+    call_args :: Vector{Vector{Int}}
     label_pc :: Vector{Int} # label+1 => pc
     locals :: Set{LocalName}
     args :: Vector{Symbol}
@@ -367,6 +363,10 @@ join{Ls}(p::Prod{Ls},v::Lattice) = join(p,convert(Prod{Ls},v))
 const GTRACE = false
 const DEBUGWARN = false
 
+immutable Up
+    i :: Int
+end
+
 type Config
     join_strat :: Symbol
 end
@@ -611,6 +611,7 @@ immutable InitialState{V} <: Lattice
     args :: Vector{V}
     capt :: Vector{V}
     tenv :: Vector{V}
+    heap :: Set{Set{Any}}
 end
 function <={V}(s1::InitialState{V},s2::InitialState{V})
     length(s1.args) == length(s2.args) &&
@@ -622,6 +623,11 @@ function <={V}(s1::InitialState{V},s2::InitialState{V})
             v1 <= v2 || return false
         end
     end
+
+    for obj in s1.heap
+        (obj in s2.heap) || return false
+    end
+    
     true
 end
 function ensure_filled!{V,I,F}(s::State{V,I,F}, fc::Int, code::Code, initial::InitialState)
@@ -648,6 +654,8 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         li = add_local!(ls, code.tvar_mapping[2*i-1].name)
         ls.phis[li][0] = is.tenv[i]
     end
+    #@show is.heap
+    ls.heap[1] = copy(is.heap)
 end
 
 eval_local(s::State, fc::Int, pc::Int, name) = eval_local(s.funs[fc], pc, name)
@@ -658,6 +666,7 @@ function propagate!{V,LV}(s::State,fc::Int,pc::Int,next::Int,sd::StateDiff{V,LV}
     union!(s.lost[fc], sd.lost)
     chgd |= (l != length(s.lost[fc]))
     chgd |= propagate!(s.funs[fc],pc,next,sd)
+
     if next == s.funs[fc].len+1
         chgd |= propagate!(s,s.finals[fc],fc,pc,sd)
     end
@@ -666,7 +675,8 @@ end
 InitialState{V}(::Type{V}, code::Code) =
     InitialState(V[bot(V) for i = 1:length(code.args)],
                  V[bot(V) for i = 1:length(code.capt)],
-                 V[bot(V) for i = 1:div(length(code.tvar_mapping), 2)])
+                 V[bot(V) for i = 1:div(length(code.tvar_mapping), 2)],
+                 Set{Set{Any}}())
 type FinalState{V} <: Lattice
     ret_val :: V
     ret_sa :: Set{Int}
@@ -709,19 +719,22 @@ function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
         chgd = true
     end
     l = length(fs.ret_sa)
-    push!(fs.ret_sa, s.funs[fc].len+1) # TODO not sure about pc in general (exceptions ?)
+    push!(fs.ret_sa, pc) # TODO not sure about pc in general (exceptions ?)
     if l != length(fs.ret_sa)
         chgd = true
     end
     ls = s.funs[fc]
     code = ls.code
-    return_gate = Set{Any}([symbol("__arg_$i") for i=1:length(code.args)])
-    union!(return_gate, fs.ret_sa)
-    #@show return_gate ls.heap[pc]
-    for obj in ls.heap[pc]
-        obj = intersect(obj, return_gate)
-        if !(obj in fs.heap)
-            push!(fs.heap, obj)
+
+    for obj in ls.heap[length(code.body)+1]
+        nobj = Set{Any}()
+        for v in obj
+            if v in fs.ret_sa || isa(v,Up)
+                push!(nobj, v)
+            end
+        end
+        if !(nobj in fs.heap)
+            push!(fs.heap, nobj)
             chgd = true
         end
     end
@@ -882,7 +895,7 @@ call_gate(v::ConstCode) = v
 call_gate(p::Prod) = prod(map(call_gate,p.values))
 NOMETH = 0
 
-function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector{V},env)
+function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector{V},env, args_heap)
     child = Thread(0,1)
     args = map(call_gate, args)
     initial = InitialState(V, fcode)
@@ -890,7 +903,9 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
     if fcode.isva
         narg -= 1
         vargs = args[narg+1:end]
+        vargs_heap = args_heap[narg+1:end]
         args = args[1:narg]
+        args_heap = args_heap[1:narg]
     end
     if narg != length(args)
         DEBUGWARN && warn(@sprintf("Wrong arg count for %s : %s vs %s%s", fcode, fcode.args, args, fcode.isva ? " (vararg)" : ""))
@@ -912,7 +927,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         initial.args[i] = arg
     end
     if fcode.isva
-        tup = eval_call_values!(sched, child, sd, convert(V,Const(Base.tuple)), vargs)
+        tup = eval_call!(sched, child, sd, convert(V,Const(Base.tuple)), vargs, vargs_heap)
         @assert tup !== nothing
         initial.args[narg+1] = tup
     end
@@ -931,6 +946,24 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         val = i > length(env) ? top(V) : convert(V,env[i])
         initial.capt[i] = val
     end
+    if t.fc > 0
+        heap = sched.states.funs[t.fc].heap[t.pc]
+    else
+        heap = Set{Set{Any}}([Set{Any}([:global])])
+    end
+    for obj in heap
+        nobj = Set{Any}()
+        for (i,arg) in enumerate(args_heap)
+            if arg in obj
+                push!(nobj, Up(i))
+            end
+        end
+        if :global in obj
+            push!(nobj, :global)
+        end
+        push!(initial.heap, nobj)
+    end
+    #@show initial.heap
 
     # check for cached version of this call
     fc = 0
@@ -945,28 +978,26 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
     end
     if fc == 0
         fc = register_fun!(sched, fcode, initial)
+        child.fc = fc
+        heappush!(sched.threads, child)
     end
     
-    child.fc = fc
-    
-    heappush!(sched.threads, child)
-
     push!(t.wait_on, fc)
     t.fc > 0 && push!(sched.called_by[fc], (t.fc,t.pc))
     nothing
 end
 
-function eval_call!{V,S}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::Int, args::Tuple{Vararg{Int}})
+function eval_call!{V,S}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::Int, args::Vector{Int})
     n = length(args)
     stack = Array(V, n)
     for i=1:n
         stack[i] = eval_local(sched.states,t.fc,t.pc,args[i])
     end
     f = eval_local(sched.states,t.fc,t.pc,fun)
-    sd.value = eval_call_values!(sched, t, sd, f, stack)
+    sd.value = eval_call!(sched, t, sd, f, stack, Any[args...])
 end
 
-function eval_call_values!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V, args::Vector{V})
+function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V, args::Vector{V}, args_heap::Vector{Any})
     (isbot(fun) || any(isbot, args)) && (#=println("bot arg ", args); =#return bot(V))
     f = convert(Const,fun)
     if f <= Const(Base._apply)
@@ -990,6 +1021,7 @@ function eval_call_values!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff,
             end
         end
         args = actual_args
+        args_heap = map(_ -> :global, actual_args)
     end
     
     # actually do the call
@@ -997,7 +1029,7 @@ function eval_call_values!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff,
     cc = convert(ConstCode,fun)
     # known lambda
     if !istop(cc)
-        eval_call_code!(sched, t, cc.v, args, cc.env)
+        eval_call_code!(sched, t, cc.v, args, cc.env, args_heap)
         return bot(V)
     end
 
@@ -1016,7 +1048,7 @@ function eval_call_values!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff,
             for meth in meths
                 cc = code_for_method(meth, argtypes)
                 istop(cc) && return top(V) # TODO unknown effects
-                eval_call_code!(sched, t, cc.v, args, cc.env)
+                eval_call_code!(sched, t, cc.v, args, cc.env, args_heap)
             end
             return bot(V)
         else
@@ -1390,7 +1422,7 @@ function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
         sd.value = top(V) # global
     end
 end
-StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, :bla)
+StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, :global)
 function Base.copy{V,TV}(sd::StateDiff{V,TV})
     StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw, sd.heap_use)
 end
@@ -1444,10 +1476,9 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             #show_dict(STDOUT, sched.states[t.fc,1])
         end
         #println("Returned heap : $(final.heap) from")
-        #=for obj in final.heap
-            if !isempty(intersect(final.ret_sa, obj))
-                sd.heap_use = 
-        end=#
+        for obj in final.heap
+            
+        end
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
         args = code.call_args[t.pc]
         if e.head === :new
@@ -1464,10 +1495,11 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         end
     elseif isa(e,Expr) && e.head === :return
         sd.value = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
-        sd.heap_use = code.call_args[t.pc]
+        sd.heap_use = code.call_args[t.pc][1]
         next_pc = branch_pc = length(code.body)+1
     elseif isa(e,GotoNode)
         next_pc = branch_pc = code.label_pc[e.label::Int+1]
+        sd.value = convert(V,Const(nothing))
     elseif isa(e,Expr) && e.head === :gotoifnot
         branch_pc = code.label_pc[e.args[2]::Int+1]
         sd.value = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
@@ -1485,11 +1517,14 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         eval_assign!(sched, sd, code, e.args[1]::LocalName, val, code.call_args[t.pc][1])
     elseif isa(e,Expr) && e.head == :enter
         push!(t.eh_stack, code.label_pc[e.args[1]::Int+1])
+        sd.value = convert(V,Const(nothing))
     elseif isa(e,Expr) && e.head == :leave
         for i=1:(e.args[1]::Int)
             pop!(t.eh_stack)
         end
+        sd.value = convert(V,Const(nothing))
     elseif isa(e,Expr) && e.head in (:line,:boundscheck,:meta,:simdloop) || isa(e,LineNumberNode) || isa(e,LabelNode)
+        sd.value = convert(V,Const(nothing))
     elseif isa(e,Expr)
         dump(e)
         error("unknown expr")
@@ -1669,45 +1704,45 @@ function linearize_stmt!(stmt,body,args_pc)
             push!(pcs, length(body))
         end
         push!(body,stmt)
-        push!(args_pc, tuple(pcs...))
+        push!(args_pc, pcs)
     elseif isa(stmt,Expr) && stmt.head === :(=)
         linearize_stmt!(stmt.args[2],body,args_pc)
         apc = length(body)
         push!(body,stmt)
-        push!(args_pc, (apc,))
+        push!(args_pc, [apc])
     elseif isa(stmt,Expr) && stmt.head in (:return, :gotoifnot)
         linearize_stmt!(stmt.args[1],body,args_pc)
         apc = length(body)
         push!(body,stmt)
-        push!(args_pc, (apc,))
+        push!(args_pc, [apc])
     elseif isa(stmt,SymbolNode)
         push!(body,stmt.name)
-        push!(args_pc, ())
+        push!(args_pc,Int[])
     elseif isa(stmt,Expr) && stmt.head === :copyast
         push!(body,stmt.args[1])
-        push!(args_pc,())
-    elseif isa(stmt,Expr) && (stmt.head === :& || stmt.head === :const)# TODO this is not correct
+        push!(args_pc,Int[])
+    elseif isa(stmt,Expr) && (stmt.head === :& || stmt.head === :const) # TODO this is not correct
         linearize_stmt!(stmt.args[1], body, args_pc)
     elseif isa(stmt,Expr) && stmt.head in (:type_goto, :static_typeof)
         error("type_goto/static_typeof are not supported (and never will ?)")
     elseif isa(stmt,Expr) && stmt.head === :the_exception
         push!(body, :the_exception) # TODO name collision, make this a proper part of state
-        push!(args_pc,())
+        push!(args_pc,Int[])
     elseif isa(stmt,LambdaStaticData)
         push!(body,Function) # canonicalize inline ASTs into :
-        push!(args_pc,())    # new(Function, ast, env...)
+        push!(args_pc,Int[])    # new(Function, ast, env...)
         push!(body,stmt)
-        push!(args_pc,())
+        push!(args_pc,Int[])
         capts = capt_from_ast(stmt)
         for capt in capts
             push!(body, capt)
-            push!(args_pc,())
+            push!(args_pc,Int[])
         end
-        push!(args_pc, tuple(((length(body)-1-length(capts)):length(body))...))
+        push!(args_pc, Int[((length(body)-1-length(capts)):length(body))...])
         push!(body, Expr(:new, Function, stmt, capts...))
     else
         push!(body,stmt)
-        push!(args_pc,())
+        push!(args_pc,Int[])
     end
 end
 
@@ -1757,7 +1792,7 @@ function code_from_ast(linf,tenv,sig::ANY)
     orig_body = ast.args[3].args
 
     body = Any[]
-    args_pc = Tuple{Vararg{Int}}[]
+    args_pc = Vector{Int}[]
     sizehint!(body,length(orig_body))
     sizehint!(args_pc,length(orig_body))
     for stmt in orig_body
@@ -1938,7 +1973,7 @@ function run(f::Function, args)
     end
     empty!(_code_cache)
     t = Thread(0,0)
-    eval_call_values!(sched, t, StateDiff(t,Analysis.ValueT,Ty), convert(Analysis.ValueT,Const(f)), Analysis.ValueT[args...])
+    eval_call!(sched, t, StateDiff(t,Analysis.ValueT,Ty), convert(Analysis.ValueT,Const(f)), Analysis.ValueT[args...], Any[:global for _ in args])
     dt = @elapsed begin
         niter,maxthr = run(sched)
     end
