@@ -411,6 +411,7 @@ type LocalStore{V<:Lattice}
     code :: Code
     dtree :: DomTree
     heap :: Vector{Set{Set{Any}}}
+    heap_uprefs :: Dict{Int,Dict{Int,Vector{Set{Any}}}} # pc => callee => [upref1, ..., uprefn]
     changed :: BitVector
 end
 function Base.getindex(s::LocalStore, pc)
@@ -418,7 +419,10 @@ function Base.getindex(s::LocalStore, pc)
 end
 function LocalStore{V}(::Type{V}, code::Code)
     n = length(code.body)
-    LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),V[bot(V) for i=1:n+1], Array(Dict{Int,V},0), n, code, build_dom_tree(code), [Set{Set{Any}}() for i=1:n+1], trues(n+1))
+    LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),
+               V[bot(V) for i=1:n+1], Array(Dict{Int,V},0), n, code, build_dom_tree(code),
+               [Set{Set{Any}}() for i=1:n+1], Dict{Int,Dict{Int,Vector{Set{Any}}}}(),
+               trues(n+1))
 end
 type Thread
     fc :: Int
@@ -463,6 +467,7 @@ function add_local!{V}(s::LocalStore{V}, name)
 end
 
 function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
+    @assert pc > 0
     chgd = false
     d = sd.locals
     for lsd in d
@@ -503,7 +508,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         if sd.sa_name in nobj
             pop!(nobj, sd.sa_name)
         end
-        if sd.heap_use in nobj
+        if any(o -> o in nobj, sd.heap_use)
             push!(nobj, sd.sa_name)
         end
         for idx = 1:length(d)
@@ -524,7 +529,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             chgd = true
         end
     end
-        if sd.heap_use === :new
+        if any(o -> o === :new, sd.heap_use)
             obj = Set{Any}([sd.sa_name])
             if !(obj in s.heap[next])
                 push!(s.heap[next], obj)
@@ -561,7 +566,7 @@ function eval_local!{V}(s::LocalStore{V}, sd, pc::Int, name::LocalName)
             ds = s.defs[idx]
             def = find_def_fast(s.code, s.dtree, ds, pc)
             #println("Before def $name : $def $(sd.heap_use) at $pc")
-            sd.heap_use = name#(name, def[2])
+            sd.heap_use = Any[name]#(name, def[2])
             val = eval_def(s, idx, def[2])#def[2] > 0 ? s.sa[def[2]] : bot(V)
             #end
             #@show vals
@@ -728,12 +733,15 @@ function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
 
     for obj in ls.heap[length(code.body)+1]
         nobj = Set{Any}()
+        is_returned = false
         for v in obj
-            if v in fs.ret_sa || isa(v,Up)
-                push!(nobj, v)
+            if v in fs.ret_sa
+                is_returned = true
+                break
             end
+            isa(v,Up) && push!(nobj, v)
         end
-        if !(nobj in fs.heap)
+        if is_returned && !(nobj in fs.heap)
             push!(fs.heap, nobj)
             chgd = true
         end
@@ -951,19 +959,30 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
     else
         heap = Set{Set{Any}}([Set{Any}([:global])])
     end
+    uprefs = Array(Set{Any},0)
+    last_up = 0
     for obj in heap
         nobj = Set{Any}()
+        nupref = Set{Any}()
+        has_arg = false
         for (i,arg) in enumerate(args_heap)
             if arg in obj
-                push!(nobj, Up(i))
+                has_arg = true
+                push!(nobj, fcode.args[i])
+                push!(nupref, arg)
             end
         end
-        if :global in obj
-            push!(nobj, :global)
+        if has_arg && !(nobj in initial.heap)
+            last_up += 1
+            push!(nobj, Up(last_up))
+            push!(uprefs, nupref)
         end
+        #=if :global in obj
+            push!(nobj, :global)
+        end=#
         push!(initial.heap, nobj)
     end
-    #@show initial.heap
+    @show initial.heap
 
     # check for cached version of this call
     fc = 0
@@ -980,6 +999,13 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         fc = register_fun!(sched, fcode, initial)
         child.fc = fc
         heappush!(sched.threads, child)
+    end
+
+    if t.fc > 0
+        s_uprefs = sched.states.funs[t.fc].heap_uprefs
+        upr_map = get!(s_uprefs, t.pc, Dict{Int,Vector{Set{Any}}}())
+        @assert !haskey(upr_map, fc)
+        upr_map[fc] = uprefs
     end
     
     push!(t.wait_on, fc)
@@ -1379,7 +1405,7 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
         f <= Const(OtherBuiltins.new_array_1d) ||
         f <= Const(OtherBuiltins.new_array_2d) ||
         f <= Const(OtherBuiltins.new_array_3d)
-        sd.heap_use = :new
+        sd.heap_use = Any[:new]
         return convert(V,Birth(t.fc,t.pc))
     end
     top(V)
@@ -1422,9 +1448,9 @@ function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
         sd.value = top(V) # global
     end
 end
-StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, :global)
+StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, Any[:global])
 function Base.copy{V,TV}(sd::StateDiff{V,TV})
-    StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw, sd.heap_use)
+    StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw, copy(sd.heap_use))
 end
 
 function may_throw!(sd :: StateDiff, v)
@@ -1447,10 +1473,36 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
 
     if !isempty(t.wait_on)
         ncycled = 0
-        final = bot(FinalState{V})
+        heap_use = Any[]
         for i = 1:length(t.wait_on)
             wait_on = t.wait_on[i]
-            join!(final, sched.states.finals[wait_on])
+            final = sched.states.finals[wait_on]
+
+            if final.must_throw
+                must_throw!(sd, final.thrown)
+            else
+                may_throw!(sd, final.thrown)
+            end
+            sd.value = join(sd.value, final.ret_val)
+
+            for obj in final.heap
+                up_n = 0
+                for v in obj
+                    if isa(v, Up)
+                        @assert(up_n == 0, "dup uprefs")
+                        up_n = (v::Up).i
+                    end
+                end
+                if up_n > 0
+                    @show sched.states.funs[t.fc].heap_uprefs[t.pc][wait_on]
+                else
+                    @assert isempty(obj)
+                    push!(heap_use, :new)
+                end
+            end
+            @show t.fc heap_use final.heap
+            #resize!(upr, max(length(upr), up_n))
+            
             if !sched.done[wait_on] # cycle
                 ncycled += 1
                 t.wait_on[ncycled] = wait_on
@@ -1464,21 +1516,16 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             ft.cycle += 1
         end
         # TODO move into function
-        if final.must_throw
-            must_throw!(sd, final.thrown)
-        else
-            may_throw!(sd, final.thrown)
-        end
-        sd.value = final.ret_val
-#        sd.heap_use = 
+        sd.heap_use = heap_use
         if isbot(sd.value)
             #println("returned bot in $(t.fc) $code :")
             #show_dict(STDOUT, sched.states[t.fc,1])
         end
-        #println("Returned heap : $(final.heap) from")
+        #=println("Returned heap : $(final.heap) from")
+        println("Uprefs : $()")
         for obj in final.heap
             
-        end
+        end=#
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
         args = code.call_args[t.pc]
         if e.head === :new
@@ -1495,7 +1542,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         end
     elseif isa(e,Expr) && e.head === :return
         sd.value = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
-        sd.heap_use = code.call_args[t.pc][1]
+        sd.heap_use = Any[code.call_args[t.pc][1]]
         next_pc = branch_pc = length(code.body)+1
     elseif isa(e,GotoNode)
         next_pc = branch_pc = code.label_pc[e.label::Int+1]
@@ -1689,8 +1736,8 @@ function Base.show(io::IO, s::Scheduler)
             println(io, "\t- ", fun, " at ", pc)
         end
         println(io, "final : ", s.states.finals[k])
-        println(io, "initial : ")
-        show_dict(io, s.states[k, 1])
+        println(io, "initial : ", s.states.initials[k])
+        #show_dict(io, s.states[k, 1])
         page_out && (k % 30 == 0) && read(STDIN, Char)
     end
     println(io, "======")
