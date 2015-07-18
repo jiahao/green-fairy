@@ -507,7 +507,7 @@ function propagate_heap!(s, heap_use, pc, into)
     new_heap = Array(Tuple{Any,Int,Int}, 0)
     chgd = false
     for obj in heap_use
-        obj !== :global || continue
+        !(obj in (:globalR,:globalX,:globalZ)) || continue
         local p
         if isa(obj, Int)
             p = dom_path_to(s.code, s.dtree, obj, pc)
@@ -562,7 +562,7 @@ function propagate_heap!(s, heap_use, pc, into)
                     for inc in eachindex(phi_heap)
                         inc_phi_heap = phi_heap[inc]
                         for i in eachindex(inc_phi_heap)
-                            println("doing $inc $i")
+                            #println("doing $inc $i")
                             cur_obj = inc_phi_heap[i]
                             idx = findfirst(new_heap, cur_obj)
                             if idx > 0
@@ -612,13 +612,12 @@ function restrict_heap_ref(s, h, pc)
     pcdepth = dom_depth(s.dtree, pclabel)
     @assert pcdepth >= 0
     while true
-#        @show h
+        #        @show h
         hdef, hid, hinc = h
         hlabel = find_label(s.code, hdef.pc)
         hdepth = dom_depth(s.dtree, hlabel)
         @assert hdepth >= 0
-        if hid == 0 || hdepth < pcdepth || hdepth == pcdepth && hdef.pc <= pc
-            #println("Done : $h")
+        if hid == 0 || hdepth < pcdepth || hdepth == pcdepth && hdef.pc < pc
             return h
         end
         #        @show hdef h pc
@@ -662,15 +661,20 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
 
                 # update heap refs
                 phi_heap = get!(s.phi_heap[li], pc, Array(HeapRef,0))
-                println("Updating ϕ $k at $pc : ", s.defs[li].phis[lbl])
+                #println("Updating ϕ $k at $pc : ", s.defs[li].phis[lbl])
                 for (i,pred) in enumerate(s.defs[li].phis[lbl])
                     if length(phi_heap) < i
                         @assert length(phi_heap) == i-1
                         push!(phi_heap, Array(Tuple{Def,Int,Int},0))
                     end
-                    propagate_heap!(s, Any[k], pred, phi_heap[i])
-                    for j=1:length(phi_heap[i])
-                        phi_heap[i][j] = restrict_heap_ref(s, Any[phi_heap[i][j]], inter_idom(s.code, s.dtree, pc, pred))
+                    additional = Array(Tuple{Def,Int,Int},0)
+                    propagate_heap!(s, Any[k], pred, additional)
+                    for ref in additional
+                        ref = restrict_heap_ref(s, ref, inter_idom(s.code, s.dtree, pc, pred))
+                        if !(ref in phi_heap[i])
+                            push!(phi_heap[i], ref)
+                            chgd = true
+                        end
                     end
                 end
             end
@@ -693,6 +697,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         end
         filter!(t -> t !== :new, sd.heap_use)
     end
+    #filter!(t -> t !== :globalZ, sd.heap_use)
     chgd |= propagate_heap!(s, sd.heap_use, pc, s.heap[pc])
     
     sa = sd.sa_name
@@ -975,6 +980,7 @@ type Scheduler{ValueT,StateT}
 end
 
 function register_fun!(sched::Scheduler, fcode::Code, initial::InitialState)
+    println("start $fcode")
     push!(sched.funs, fcode)
     fc = length(sched.funs)
     ensure_filled!(sched.states, fc, fcode, initial)
@@ -1238,7 +1244,10 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
     end
     
     push!(t.wait_on, fc)
-    t.fc > 0 && push!(sched.called_by[fc], (t.fc,t.pc))
+    if t.fc > 0
+        println(sched.funs[fc], " by ", sched.funs[t.fc], " : ", t.wait_on, " (", sched.done[fc], ")")
+        push!(sched.called_by[fc], (t.fc,t.pc))
+    end
     nothing
 end
 
@@ -1276,7 +1285,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
             end
         end
         args = actual_args
-        args_heap = Any[:global for _ in actual_args]
+        args_heap = Any[1 for _ in actual_args]
     end
     
     # actually do the call
@@ -1295,6 +1304,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
         if !isa(f,Function)
             f = getfield(sched.funs[t.fc].mod, :call) # call overloading
             unshift!(args, fun)
+            unshift!(args_heap, 1) # TODO get f heap
         end
 
         argtypes = to_signature(args)
@@ -1664,19 +1674,27 @@ function eval_assign!{V}(sched,sd,code,name,res::V,saval::Int)
     nothing
 end
 
-function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e,mod)
+function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
     if e in code.locals || isa(e,GenSym)
         ls = sched.states.funs[t.fc]
         val = eval_local!(ls, sd, t.pc, e)
         sd.value = val
-    elseif isa(e,Symbol) && isconst(mod,e)
-        sd.value = convert(V, Const(getfield(mod,e)))
+    elseif isa(e,GlobalRef)
+        mod = e.mod
+        e = e.name
+        if isconst(mod,e)
+            sd.value = convert(V, Const(getfield(mod,e)))
+        else
+            if e !== :? # TODO put me under a debug flag
+                may_throw!(sd, Ty(UndefVarError)) # you never know what people can use as a global
+            end
+            sd.value = top(V) # global
+        end
     else
-        may_throw!(sd, Ty(UndefVarError))
-        sd.value = top(V) # global
+        @assert(false, "Jeff said raw symbols where gone, so what is $e ? :(")
     end
 end
-StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, Any[:global])
+StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, Any[:globalX])
 function Base.copy{V,TV}(sd::StateDiff{V,TV})
     StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw, copy(sd.heap_use))
 end
@@ -1766,13 +1784,9 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             eval_call!(sched, t, sd, args[1], args[2:end])
         end
     elseif isa(e, LocalName)
-        if e === :UNKNOWN
-            sd.value = top(V)
-        else
-            eval_sym!(sched, t, sd, code, e, code.mod)
-        end
+        eval_sym!(sched, t, sd, code, e)
     elseif isa(e, GlobalRef)
-        eval_sym!(sched, t, sd, code, e.name, e.mod)
+        eval_sym!(sched, t, sd, code, e)
     elseif isa(e,Expr) && e.head === :return
         sd.value = eval_local(sched.states,t.fc,t.pc,code.call_args[t.pc][1])
         sd.heap_use = Any[code.call_args[t.pc][1]]
@@ -2278,7 +2292,7 @@ function run(f::Function, args)
     end
     empty!(_code_cache)
     t = Thread(0,0)
-    eval_call!(sched, t, StateDiff(t,Analysis.ValueT,Ty), convert(Analysis.ValueT,Const(f)), Analysis.ValueT[args...], Any[:global for _ in args])
+    eval_call!(sched, t, StateDiff(t,Analysis.ValueT,Ty), convert(Analysis.ValueT,Const(f)), Analysis.ValueT[args...], Any[:globalR for _ in args])
     dt = @elapsed begin
         niter,maxthr = run(sched)
     end

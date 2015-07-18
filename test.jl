@@ -25,7 +25,7 @@ GreenFairy.test(f2) do r
 end
 function f3(y)
     x = 1
-    while UNKNOWN
+    while ?
         x = x + y
     end
     x
@@ -42,7 +42,7 @@ function g2()
     x = 1
     y = 1
     z = 1
-    while UNKNOWN
+    while ?
         if y < 0
             z = -1
         end
@@ -59,7 +59,7 @@ GreenFairy.test(g2) do r
 end
 function g3()
     x = 2
-    if UNKNOWN
+    if ?
         x = -2
         x = 1
     end
@@ -79,7 +79,7 @@ end
 
 VERB && println("recursion")
 function f4(x)
-    if UNKNOWN
+    if ?
         x
     else
         f4(x+1)
@@ -107,7 +107,7 @@ end
 
 VERB && println("tuple widening")
 function f6(x)
-    if UNKNOWN
+    if ?
         f6((x,x))
     else
         x
@@ -118,7 +118,7 @@ GreenFairy.test(f6, Ty(Tuple{Int})) do r
     @test r.ret_val <= Ty(Tuple)
 end
 function f7(x)
-    if UNKNOWN
+    if ?
         f7((1,x...))
     else
         x
@@ -142,7 +142,7 @@ GreenFairy.test(f8) do r
     @test r.thrown <= Const(3)
     @test isbot(r.ret_val)
 end
-f9() = UNKNOWN ? throw(3) : 22
+f9() = ? ? throw(3) : 22
 GreenFairy.test(f9) do r
     returns(r)
     @test !r.must_throw
@@ -155,7 +155,7 @@ function f10()
         f8()
         x = 44
     catch y
-        return UNKNOWN ? x : y
+        return ? ? x : y
     end
     x
 end
@@ -170,7 +170,7 @@ function f11()
         f9()
         x = -1
     catch y
-        return UNKNOWN ? x : y
+        return ? ? x : y
     end
     if x < 0
         3
@@ -189,14 +189,14 @@ function g12()
 end
 let z = 3
     function g12(y)
-        UNKNOWN ? z : y
+        ? ? z : y
     end
 end
 
 function f12()
     x = 3
-    h = (y -> UNKNOWN ? x : y)
-    #UNKNOWN ? g12(2) : h(2) # environment for generic functions does not work yet
+    h = (y -> ? ? x : y)
+    #? ? g12(2) : h(2) # environment for generic functions does not work yet
     h(2)
 end
 GreenFairy.test(f12) do r
@@ -222,7 +222,7 @@ function f15()
     f = (x,y) -> x*y
     v = 1.0
     A = [1,2,3]
-    UNKNOWN ? imp_foldl(f,v,A) : rec_foldl(f,v,A)
+    ? ? imp_foldl(f,v,A) : rec_foldl(f,v,A)
 end
 GreenFairy.test(f15) do r
     returns(r)
