@@ -74,11 +74,32 @@ end
 
 type DomTree
     idom :: Vector{Tuple{Int,Int}} # label => immediate dominator
+    depth :: Vector{Int} # label => dominator depth
     pred :: Vector{Vector{Tuple{Int,Int}}} # label => (pred label, pc), ...
     succ :: Vector{Vector{Tuple{Int,Int}}} # label+1 => (succ label, pc) ...
     order :: Vector{Int} # label+1 => rev po index
     order_perm :: Vector{Int} # reverse perm
     front :: Vector{Dict{Int,Tuple{Int,Int}}} # label => dom frontier : [ front_label => front range ]
+end
+
+function inter_idom(code, dtree::DomTree, pc1::Int, pc2::Int)
+    l1 = find_label(code, pc1)
+    l2 = find_label(code, pc2)
+    inter_idom((l1,pc1),(l2,pc2), dtree.order, dtree.idom)[2]
+end
+
+dom_depth(dtree, label) = label == 0 ? 0 : dtree.depth[label]
+
+function compute_depth!(idom, depth, i)
+    i != 0 || return 0
+    depth[i] == -1 || return depth[i]
+    id = idom[i][1]
+    if id == -1
+        return -1
+    end
+    d = compute_depth!(idom, depth, id)+1
+    depth[i] = d
+    d
 end
 
 function build_dom_tree(code, order, pred, succ, idom)
@@ -91,7 +112,6 @@ function build_dom_tree(code, order, pred, succ, idom)
         any_changed = false
         for i=2:N+1
             ni = order_perm[i]-1
-            #code.label_pc[ni] < 0 && continue
             
             new_idom = (-1,0)
             no_pred_idom = true
@@ -108,9 +128,14 @@ function build_dom_tree(code, order, pred, succ, idom)
             end
         end
     end
-    #@assert count(x->x[1] < 0, idom) == 0
+
+    depth = fill(-1, N)
+    for i=1:N
+        compute_depth!(idom, depth, i)
+    end
+    
     front = dom_front(idom, pred)
-    DomTree(idom, pred, succ, order, order_perm, front)
+    DomTree(idom, depth, pred, succ, order, order_perm, front)
 end
 
 function build_dom_tree(code)
@@ -119,6 +144,10 @@ function build_dom_tree(code)
     build_dom_tree(code, order, pred, succ, fill((-1,0), N))
 end
 
+# one day :
+# - make this a proper incremental dominator tree update
+#   i.e. find a convincing paper
+# - add a symmetric del_edge! and use it to implement temporal sparsity
 function add_edge!(code, dtree::DomTree, from::Int, dest::Int)
     from_lb = find_label(code, from)
     ((from_lb,from) in dtree.pred[dest]) && return dtree
@@ -324,4 +353,17 @@ function find_def_fast(code, dtree, ds, pc)
     @assert(id != -1, "no idom for $l : $(dtree.idom) | $(dtree.pred)")
     return find_def_fast(code, dtree, ds, pc)
 end
-export DefStore,DomTree,find_label,add_def!,find_def_fast
+function dom_path_to!(code, dtree, pc_from, pc_to, p)
+    from_label = find_label(code, pc_from)
+    to_label = find_label(code, pc_to)
+    if to_label == from_label
+        return p
+    else
+        @assert(to_label != 0, "asked for a non dominating path")
+        _, ipc = dtree.idom[to_label]
+        unshift!(p, (ipc,code.label_pc[to_label]))
+        return dom_path_to!(code, dtree, pc_from, ipc, p)
+    end
+end
+dom_path_to(code, dtree, pc_from, pc_to) = dom_path_to!(code, dtree, pc_from, pc_to, Tuple{Int,Int}[])
+export DefStore,DomTree,find_label,add_def!,find_def_fast,dom_path_to!,dom_path_to,inter_idom
