@@ -27,37 +27,6 @@ function CodeTable(s,fc,e)
     code = s.funs[fc]
     ls = s.states.funs[fc]
     n = length(code.body)
-    #=for pc = 1:n
-        ts = find(t->t.fc == fc && t.pc == pc, s.threads)
-        line_active = !isempty(ts)
-        line_waiting = any(i -> !isempty(s.threads[i].wait_on), ts)
-        line = Elem(:tr, style=Dict(:fontWeight => line_active ? :bold : :normal,
-                                    :backgroundColor => line_waiting ? "#f2a0a0" : line_active ? "#e099f2" : :white))
-        line <<= Elem(:td, line_active ? "➡" :  "", style = Dict())
-        line <<= Elem(:td, string(pc))
-        line <<= Elem(:td, ct.expr_cache[pc], style = Dict(:fontFamily => :monospace))
-        line <<= Elem(:td, string(ls.sa[pc]))
-        lbl = findfirst(code.label_pc, pc)
-        parent_lbl = find_label(code, pc)
-        deftd = Elem(:td)
-        for i = 1:length(ls.defs)
-            ds = ls.defs[i]
-            lname = ls.local_names[i]
-            if haskey(ds.defs,parent_lbl)
-                for pc2 in ds.defs[parent_lbl]
-                    if pc == pc2
-                        deftd <<= Elem(:div, [Elem(:span, Elem(:b, "def"), style = Dict(:color => :green)), "($lname) = $(eval_def(ls,i,pc))"])
-                    end
-                end
-            end
-            if haskey(ds.phis, lbl)
-                incs = ds.phis[lbl]
-                deftd <<= Elem(:div, [Elem(:span, Elem(:b, "ϕ"), style = Dict(:color => :red)), "($lname: $incs) = $(eval_def(ls,i,pc))"])
-            end
-        end
-        line <<= deftd
-        lines[pc] = line
-    end=#
     table = Elem(:table, Elem[Elem(:tr, [Elem(:td, string(i)), Elem(:td), Elem(:td, i <= n ? e[i] : "end", style = Dict(:fontFamily => :monospace)), Elem(:td, GreenFairy.BOT_SYM), Elem(:td, Elem(:ul))]) for i=1:n+1])
     c = CodeTable(s,fc,e,table, Int[1])
     for i=1:n+1
@@ -92,8 +61,11 @@ end
 function with_pcstat(tree, pc, txt, bgcolor)
     assoc(tree, pc, assocstyle(assoc(children(tree)[pc],2,Elem(:td,Elem(:span,txt))), :backgroundColor, bgcolor))
 end
+function heapstring(h)
+    string("[", join(String[string(ref) for ref in h], ", "), "]")
+end
 function with_sa(c, tree, pc)
-    assoc(tree, pc, assoc(children(tree)[pc],4,Elem(:td,string(c.s.states.funs[c.fc].sa[pc]))))
+    assoc(tree, pc, assoc(children(tree)[pc],4,Elem(:td,string(c.s.states.funs[c.fc].sa[pc], " = ", heapstring(c.s.states.funs[c.fc].heap[pc])))))
 end
 function with_ssa(c, tree)
     ls = c.s.states.funs[c.fc]
@@ -109,7 +81,12 @@ function with_ssa(c, tree)
         end
         for (lbl,incs) in ds.phis
             pc = c.s.funs[c.fc].label_pc[lbl]
-            ssa_info[pc] = push(get(ssa_info, pc, PersistentVector{Node}()), Elem(:li,[Elem(:span, "ϕ", style = Dict(:color => :red, :fontWeight => :bold)), Elem(:span, "($lname: $incs)", style = Dict(:fontWeight => :bold)), Elem(:span, " = $(GreenFairy.eval_def(ls,i,pc))")]))
+            hp = ls.phi_heap[i]
+            hps = ""
+            if haskey(hp, pc)
+                hps = " = " * join([heapstring(inc) for inc in hp[pc]], ", ")
+            end
+            ssa_info[pc] = push(get(ssa_info, pc, PersistentVector{Node}()), Elem(:li,[Elem(:span, "ϕ", style = Dict(:color => :red, :fontWeight => :bold)), Elem(:span, "($lname: $incs)", style = Dict(:fontWeight => :bold)), Elem(:span, " = $(GreenFairy.eval_def(ls,i,pc))$hps")]))
         end
     end
     for (pc,v) in ssa_info
@@ -155,7 +132,7 @@ function F()
     y
 end
 const N = 1
-function K(c::UI.CodeTable, ::Union(Escher.LeftButton,Float64))
+#=function K(c::UI.CodeTable, ::Union(Escher.LeftButton,Float64))
     for i=1:N
         c = UI.step(c)
     end
@@ -201,7 +178,7 @@ function G()
     end
     z
 
-end
+end 
 module EM
 using GreenFairy
 end
@@ -240,3 +217,4 @@ function main(w)
         #end
     end
 end
+=#

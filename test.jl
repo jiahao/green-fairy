@@ -229,6 +229,20 @@ GreenFairy.test(f15) do r
     @test r.ret_val <= Ty(Float64)
 end
 
+VERB && println("some builtins")
+# nfields
+function f16()
+    x = Tuple{Int,Int}
+    xnf = nfields(x)
+    y = (1,2)
+    ynf = nfields(y)
+    (xnf,ynf,fields(Int))
+end
+GreenFairy.test(f16) do r
+    returns(r)
+    r.ret_val <= Const((2,2,0))
+end
+
 VERB && println("crashtest")
 if Base.GIT_VERSION_INFO.branch == "ob/goodbye-type_goto" # avoid type_goto
 # run on some real functions to exercise diverse control flows & stuff

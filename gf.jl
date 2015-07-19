@@ -529,7 +529,6 @@ function propagate_heap!(s, heap_use, pc, into)
             println("Unknown $obj")
             error()
         end
-
         if obj.li == 0
             for i=1:length(s.heap[obj.pc])
                 push!(new_heap, (obj,i,0))
@@ -537,7 +536,6 @@ function propagate_heap!(s, heap_use, pc, into)
         else
             #println("D $pc $(s.local_names[li])")
             haskey(s.phi_heap[obj.li], obj.pc) || return false # TODO correct ?
-            #@show s.phi_heap[obj.li]
             phi_h = s.phi_heap[obj.li][obj.pc]
             for pred_i = 1:length(phi_h)
                 for i=1:length(phi_h[pred_i])
@@ -572,6 +570,7 @@ function propagate_heap!(s, heap_use, pc, into)
                         end
                     end
                     n_inc = length(phi_heap)
+                    @assert(n_inc > 0)
                     n_del = 0
                     for i in eachindex(new_heap_replace)
                         if new_heap_replace[i] == n_inc
@@ -597,6 +596,7 @@ function propagate_heap!(s, heap_use, pc, into)
                 curpc += 1
             end         
         end
+
         for obj in new_heap
             if !(obj in into)
                 push!(into, obj)
@@ -638,7 +638,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         if !(lsd.name in s.local_names)
             li = add_local!(s, lsd.name)
             s.phis[li][0] = bot(V)
-            s.phi_heap[li][0] = HeapRef[]
+            s.phi_heap[li][0] = HeapRef[Tuple{Def,Int,Int}[]]
         end
     end
     # update phis
@@ -895,9 +895,9 @@ type FinalState{V} <: Lattice
 end
 bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),Set{Int}(),bot(V),true,Set{Int}(),0)
 function Base.show(io::IO, s::FinalState)
-    print(io, "(returned: ", s.ret_val, " [", Base.join(collect(s.ret_sa), ","), "] ")
+    print(io, "(returned: ", s.ret_val, " [", Base.join(collect(s.ret_sa), ","), "] : [", Base.join(String[string(h) for h in s.heap], ","), "]")
     if !isbot(s.thrown)
-        print(io, ", ", s.must_throw ? "must" : "may", " throw ", s.thrown)
+        print(io, " , ", s.must_throw ? "must" : "may", " throw ", s.thrown)
     end
     print(io, ")")
 end
@@ -980,7 +980,7 @@ type Scheduler{ValueT,StateT}
 end
 
 function register_fun!(sched::Scheduler, fcode::Code, initial::InitialState)
-    println("start $fcode")
+    #println("start $fcode")
     push!(sched.funs, fcode)
     fc = length(sched.funs)
     ensure_filled!(sched.states, fc, fcode, initial)
@@ -1109,17 +1109,24 @@ end
 
 eval_call_values!{L<:Lattice}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{L}, f, args) = top(L)
 
-call_gate{T<:Lattice}(v::T) = top(T)
-call_gate(v::Const) = isa(v.v, Type)? v : top(Const) # keep constant types for metaprogramming
-call_gate(v::Kind) = v
-call_gate(v::Union(Sign,Ty)) = v
-call_gate(v::ConstCode) = v
-call_gate(p::Prod) = prod(map(call_gate,p.values))
+call_gate{T<:Lattice}(f,v::T) = top(T)
+function call_gate(f,v::Const)
+    if istop(v) ||
+        isa(v.v, Type) ||
+        f.mod === Base && f.name in (:(==), :(!=)) # TODO find a better way
+        return v
+    end
+    top(Const)
+end
+call_gate(f,v::Kind) = v
+call_gate(f,v::Union(Sign,Ty)) = v
+call_gate(f,v::ConstCode) = v
+call_gate(f,p::Prod) = prod(map(v->call_gate(f,v),p.values))
 NOMETH = 0
 
 function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector{V},env, args_heap::Vector{Any})
     child = Thread(0,1)
-    args = map(call_gate, args)
+    args = map(a -> call_gate(fcode, a), args)
     initial = InitialState(V, fcode)
     narg = length(fcode.args)
     if fcode.isva
@@ -1245,7 +1252,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
     
     push!(t.wait_on, fc)
     if t.fc > 0
-        println(sched.funs[fc], " by ", sched.funs[t.fc], " : ", t.wait_on, " (", sched.done[fc], ")")
+        #println(sched.funs[fc], " by ", sched.funs[t.fc], " : ", t.wait_on, " (", sched.done[fc], ")")
         push!(sched.called_by[fc], (t.fc,t.pc))
     end
     nothing
@@ -1483,7 +1490,10 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
     end
     if f <= Const(Base.nfields)
         tty = argtypes[1].ty
-        (isleaftype(tty) || tty <: Tuple) && return convert(V, Const(length(tty.types)))
+        if isbot(meet(args[1], Ty(DataType))) # if the argument is a DataType it does not refer to the instance
+            # this kind of non-homogeneous semantics are kinda ugly
+            (isleaftype(tty) || tty <: Tuple) && return convert(V, Const(nfields(tty))) # TODO wrong for va tuple
+        end
         return convert(V, Ty(Int))
     end
     if f <= Const(Base.getfield)
@@ -1643,7 +1653,8 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
         f <= Const(OtherBuiltins.new_array) ||
         f <= Const(OtherBuiltins.new_array_1d) ||
         f <= Const(OtherBuiltins.new_array_2d) ||
-        f <= Const(OtherBuiltins.new_array_3d)
+        f <= Const(OtherBuiltins.new_array_3d) ||
+        f <= Const(Base.tuple)
         sd.heap_use = Any[:new]
         return convert(V,Birth(t.fc,t.pc))
     end
