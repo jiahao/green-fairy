@@ -76,7 +76,7 @@ function with_ssa(c, tree)
         for pcs in values(ds.defs)
             for pc in pcs
                 pc <= 0 && continue
-                ssa_info[pc] = push(get(ssa_info, pc, PersistentVector{Node}()), Elem(:li,[Elem(:span, Elem(:b, "def"), style = Dict(:color => :green, :fontWeight => :bold)), [Elem(:span,"($lname)",style=Dict(:fontWeight=>:bold)),Elem(:span," = $(GreenFairy.eval_def(ls,i,pc))")]]))
+                ssa_info[pc] = push(get(ssa_info, pc, PersistentVector{Node}()), Elem(:li,[Elem(:span, Elem(:b, "def"), style = Dict(:color => :green, :fontWeight => :bold)), Elem(:span,"($lname)",style=Dict(:fontWeight=>:bold)),Elem(:span," = $(GreenFairy.eval_def(ls,i,pc))")]))
             end
         end
         for (lbl,incs) in ds.phis

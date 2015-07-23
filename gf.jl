@@ -745,7 +745,6 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         dgens = Dict{Int,Int}()
         for (pred_i,(pred_lbl,pred_pc)) in enumerate(s.dtree.pred[lbl])
             last_statements = (pred_lbl == 0 || pred_lbl == idom_lbl)
-            println("Update of $pc: $pred_lbl @ $pred_pc | $idom_lbl @ $idom_pc")
             # count allocations up the dom tree
             while pred_lbl != 0 && pred_lbl != idom_lbl || last_statements
                 # count allocation in this EBB
@@ -755,7 +754,6 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                     alloc = s.allocs[i]
                     dgens[alloc] = get!(dgens, alloc, 0) + 1
                 end
-                println("LBUB $lb $ub $dgens")
                 if last_statements
                     last_statements = false
                 else
