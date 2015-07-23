@@ -236,18 +236,16 @@ function iterated_domfront(code, dtree, pc)
 end
 type DefStore{T}
     defs :: Dict{Int,Vector{Int}} # label => pcs
-    phis :: Dict{Int,Vector{Int}} # label => incomings    
-    vals :: Dict{Int,T} # pc => val
-    odef :: Vector{Tuple{Int,T}}
+    phis :: Dict{Int,Vector{Int}} # label => incoming defs
+    phi_edges :: Dict{Int,Vector{Int}} # label => incoming pred pc
     ndefs :: Int
 end
 function Base.show(io::IO, ds::DefStore)
     println(io, "DefStore:")
-    println(io, "\todef : ", ds.odef)
     for (i,vi) in ds.defs
         print(io, "\t- $i ")
         for k in vi
-            print(io, k, ":", ds.vals[k], " ")
+            print(io, k, " ")
         end
         println(io)
     end
@@ -260,40 +258,30 @@ function Base.show(io::IO, ds::DefStore)
         println(io)
     end
 end
-DefStore{T}(::Type{T}) = DefStore{T}(Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(), Dict{Int,T}(), Array(Tuple{Int,T},0), 0)
-function add_val!(d::DefStore, l::Int, pc::Int, val)
-    old = get!(d.vals, pc, Set{Int}())
-    if val in old
-        false
-    else
-        push!(d.vals[pc], val)
-        true
-    end
-end
-function add_def!(code, dtree::DomTree, d::DefStore, pc::Int, val)
+DefStore{T}(::Type{T}) = DefStore{T}(Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(), 0)
+
+function add_def!(code, dtree::DomTree, d::DefStore, pc::Int)
     l = find_label(code, pc)
     def_delta = 0
     defs = d.defs
-    vals = d.vals
     phis = d.phis
-    #push!(d.odef, (pc,val))
-    need_phis = false
+    phi_edges = d.phi_edges
+    chgd = false
     if !haskey(defs, l)
         defs[l] = Int[pc]
         def_delta += 1
-        need_phis = true
+        chgd = true
     else
         ldef = defs[l]
         if !(pc in ldef)
             push!(ldef, pc)
             def_delta += 1
             sort!(ldef) # TODO ugh
-            need_phis = true
+            chgd = true
         end
     end
-    chgd = add_val!(d, l, pc, val)
-    need_phis || return chgd
-    
+    chgd || return false
+
     operm = dtree.order_perm
     idf = iterated_domfront(code, dtree, pc)
     todos = Dict{Int,Vector{Int}}()
@@ -305,6 +293,7 @@ function add_def!(code, dtree::DomTree, d::DefStore, pc::Int, val)
         lo = heappop!(idf)
         l = operm[lo]-1
         phi = get!(phis, l, Int[])
+        phi_edge = get!(phi_edges, l, Int[])
         nfound = 0
         for (predl,predpc) in dtree.pred[l]
             predl == 0 || dtree.idom[predl][1] != -1 || continue
@@ -312,6 +301,7 @@ function add_def!(code, dtree::DomTree, d::DefStore, pc::Int, val)
             idx = findfirst(phi, orig_def)
             if idx == 0
                 push!(phi, orig_def)
+                push!(phi_edge, predpc)
                 nfound += 1
                 chgd = true
             else
@@ -319,12 +309,17 @@ function add_def!(code, dtree::DomTree, d::DefStore, pc::Int, val)
                     tmp = phi[end - nfound]
                     phi[end - nfound] = phi[idx]
                     phi[idx] = tmp
+                    tmp = phi_edge[end - nfound]
+                    phi_edge[end - nfound] = phi_edge[idx]
+                    phi_edge[idx] = tmp
                     nfound += 1
                 end
             end
         end
         if nfound < length(phi)
-            deleteat!(phi, 1:(length(phi)-nfound))
+            ndel = length(phi)-nfound
+            deleteat!(phi, 1:ndel)
+            deleteat!(phi_edge, 1:ndel)
             chgd = true
         end
         #chgd |= add_val!(d, l, lpc, val)

@@ -245,24 +245,30 @@ end
 
 VERB && println("crashtest")
 if Base.GIT_VERSION_INFO.branch == "ob/goodbye-type_goto" # avoid type_goto
-# run on some real functions to exercise diverse control flows & stuff
-GreenFairy.test(Core.Inference.typeinf, (), (), ()) do r
-    returns(r)
-    @test r.ret_val <= Ty(Tuple{Any,Any})
-end
-GreenFairy.test(GreenFairy.run, (), ()) do r
-    returns(r)
-    sched_T = typeof(Analysis.make_sched(Config(:a)))
-    @test r.ret_val <= Ty(Tuple{sched_T, Stats})
-end
-GreenFairy.test(*, Ty(Matrix{Float64}), Ty(Matrix{Float64})) do r
-    returns(r)
-    @test r.ret_val <= Ty(Matrix{Float64})
-end
-GreenFairy.test(*, Ty(Matrix{BigFloat}), Ty(Matrix{BigFloat})) do r
-    returns(r)
-    @test r.ret_val <= Ty(Matrix{BigFloat})
-end
+    # run on some real functions to exercise diverse control flows & stuff
+    GreenFairy.test(Core.Inference.typeinf, (), (), ()) do r
+        returns(r)
+        @test r.ret_val <= Ty(Tuple{Any,Any})
+    end
+    GreenFairy.test(GreenFairy.run, (), ()) do r
+        returns(r)
+        sched_T = typeof(Analysis.make_sched(Config(:a)))
+        @test r.ret_val <= Ty(Tuple{sched_T, Stats})
+    end
+    function f17()
+        x = rand(10,10)
+        y = rand(10,10)
+        x*y
+    end
+    GreenFairy.test(f17) do r
+        returns(r)
+        @test r.heap == Set([0])
+        @test r.ret_val <= Ty(Matrix{Float64})
+    end
+    GreenFairy.test(*, Ty(Matrix{BigFloat}), Ty(Matrix{BigFloat})) do r
+        returns(r)
+        @test r.ret_val <= Ty(Matrix{BigFloat})
+    end
 end
 
 VERB && GreenFairy.end_test()

@@ -13,11 +13,6 @@
   - mark may_throw intrinsics correctly
   - mark method error thrown correctly
 
-- think about on-the-fly code mutation (inlining, actual constprop, ...)
-  - would be super cool : figure out that a pc has converged before all its succ (reverse preorder), compute inlining cost model, inline, continue without invalidating any inference data
-
-- think about implementing type_goto :-(
-
 =#
 
 #=
@@ -25,17 +20,23 @@ Sources of non-correctness
 
 - Many things can throw exceptions and are not accounted for
   => go through every intrinsic and define exception behavior correctly
+  => also think about what to do for SIGINT & friends
+     it is probably still worth doing it correctly for escaping/aliasing guarantees
 - Captured variables can be assigned
   => lower those variables to an explicit box earlier in the pipeline
 - type_goto/static_typeof not supported
   => move away from this
 - TypeVar may not be handled correctly everywhere
   => maybe wait for the ∃ revamp before solving this
+- Environment is not captured for toplevel generic functions
 
 Sources of imprecision
 
-- bound TypeVar do not yet go look into the type env
+- bound TypeVar do not yet go look into the type env except the ones given back by Base._methods
 - no special casing of indexed_next & friends
+- no abstract inlining heuristic : e.g. (const == const) should probably be inlined very deeply (through the whole promotion machinery)
+  => can be dealt with properly with a intraprocedural cost model using something like ConstIf(arg1 & ... & argn)
+
 =#
 
 module GreenFairy
@@ -423,7 +424,44 @@ immutable Def
     li :: Int # non zero if phi
     pc :: Int
 end
-typealias HeapRef Vector{Tuple{Def,Int,Int}}
+function Base.show(io::IO, d::Def)
+    print(io, "(def:", d.pc)
+    if d.li != 0
+        print(io, " ϕ", d.li)
+    end
+    print(io, ")")
+end
+# TODO this struct is probably used a lot
+# and could maybe benefit from tighter packing
+# e.g. age is small, inc is likely to also be
+immutable HeapRef
+    def :: Def # link to the alias tree
+    inc :: Int # if refers to a phi, the incoming branch, else 0
+    ref_idx :: Int # or 0 if it is an allocation
+    gen :: Int
+    alloc :: Int
+end
+function Base.show(io::IO, hr::HeapRef)
+    print(io, "(ref:", hr.def)
+    if hr.ref_idx == 0
+        print(io, " new")
+    else
+        print(io, " ", hr.ref_idx)
+    end
+    if hr.def.li != 0
+        print(io, " inc:", hr.inc)
+    end
+    print(io, " gen:", (hr.gen == MAX_GEN ? "∞" : hr.gen), " site:", hr.alloc, ")")
+end
+birthday(hr::HeapRef,years) = HeapRef(hr.def,hr.inc,hr.ref_idx,min(MAX_GEN,hr.gen+years),hr.alloc)
+is_just_older(hr::HeapRef,hr2::HeapRef) = (hr.def == hr2.def && hr.inc == hr2.inc && hr.ref_idx == hr2.ref_idx && hr.alloc == hr2.alloc)
+merge_older(hr::HeapRef,hr2::HeapRef) = (@assert(is_just_older(hr,hr2)); HeapRef(hr.def,hr.inc,hr.ref_idx,max(hr.gen,hr2.gen),hr.alloc))
+
+typealias HeapRefs Vector{HeapRef}
+
+const MAX_GEN = 5
+const MAX_GEN_ALLOC = 2
+
 type LocalStore{V<:Lattice}
     local_names :: Vector{LocalName}
     defs :: Vector{DefStore{Set{Int}}}
@@ -432,8 +470,11 @@ type LocalStore{V<:Lattice}
     len :: Int
     code :: Code
     dtree :: DomTree
-    heap :: Vector{HeapRef} # pc => heap backref
-    phi_heap :: Vector{Dict{Int,Vector{HeapRef}}} # local => pc => inc => heap backref
+    heap :: Vector{HeapRefs} # pc => heap backref
+    phi_heap :: Vector{Dict{Int,Vector{HeapRefs}}} # local => pc => inc => heap backref
+    allocs :: Vector{Int} # sorted pcs
+    heapref_gen :: Dict{HeapRef,Int}
+    phi_heap_gen :: Dict{Int,Dict{Int,Dict{Int,Int}}} # pc => alloc => inc => dgen
     heap_uprefs :: Dict{Tuple{Int,Int},Vector{Int}} # pc => callee => [upref1, ..., uprefn]
     changed :: BitVector
 end
@@ -446,8 +487,11 @@ function LocalStore{V}(::Type{V}, code::Code)
     n = length(code.body)
     LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),
                V[bot(V) for i=1:n+1], Array(Dict{Int,V},0), n, code, build_dom_tree(code),
-               [Array(Tuple{Def,Int,Int},0) for i=1:n+1],
-               Array(Dict{Int,Vector{HeapRef}}, 0),
+               [Array(HeapRef,0) for i=1:n+1],
+               Array(Dict{Int,Vector{HeapRefs}}, 0),
+               Array(Int,0),
+               Dict{HeapRef,Int}(),
+               Dict{Int,Dict{Int,Dict{Int,Int}}}(),
                Dict{Tuple{Int,Int},Vector{Int}}(),
                trues(n+1))
 end
@@ -487,10 +531,10 @@ end
 function add_local!{V}(s::LocalStore{V}, name)
     push!(s.local_names, name)
     ds = DefStore(Set{Int})
-    add_def!(s.code, s.dtree, ds, 0, 0)
+    add_def!(s.code, s.dtree, ds, 0)
     push!(s.defs, ds)
     push!(s.phis, Dict{Int,V}())
-    push!(s.phi_heap, Dict{Int,Vector{HeapRef}}())
+    push!(s.phi_heap, Dict{Int,Vector{HeapRefs}}())
     length(s.local_names)
 end
 
@@ -502,12 +546,30 @@ function heap_for(s, def)
     end
 end
 
+function heap_add!(into, obj)
+    for i in eachindex(into)
+        if is_just_older(obj,into[i])
+            merged = merge_older(obj,into[i])
+            if merged != into[i]
+                into[i] = merged
+                return true
+            else
+                return false
+            end
+        end
+    end
+    push!(into, obj)
+    return true
+end
+
+
 # TODO better name
+# TODO move the heap_use API outside, and make it more reasonable
 function propagate_heap!(s, heap_use, pc, into)
-    new_heap = Array(Tuple{Any,Int,Int}, 0)
+    new_heap = Array(HeapRef, 0)
     chgd = false
     for obj in heap_use
-        !(obj in (:globalR,:globalX,:globalZ)) || continue
+        obj != :global || continue
         local p
         if isa(obj, Int)
             p = dom_path_to(s.code, s.dtree, obj, pc)
@@ -515,10 +577,10 @@ function propagate_heap!(s, heap_use, pc, into)
         elseif isa(obj, Symbol) || isa(obj, GenSym)
             li = findfirst(s.local_names, obj)
             obj = find_def_fast(s.code, s.dtree, s.defs[li], pc)[2]
-            # TODO this traverses the dom tree a second time, could be more efficient
             #println("For $(s.local_names[li]) $(s.code) at $pc : $obj")
+            # TODO this traverses the dom tree a second time, could be more efficient
             p = dom_path_to(s.code, s.dtree, obj, pc)
-            if obj == 0 || obj in s.code.label_pc # TODO handle zero case
+            if obj == 0 || obj in s.code.label_pc
                 obj = Def(li, obj)
             else
                 obj = Def(0, obj)
@@ -530,16 +592,18 @@ function propagate_heap!(s, heap_use, pc, into)
             error()
         end
         if obj.li == 0
-            for i=1:length(s.heap[obj.pc])
-                push!(new_heap, (obj,i,0))
+            for i in eachindex(s.heap[obj.pc])
+                ref = s.heap[obj.pc][i]
+                push!(new_heap, HeapRef(obj,0,i,ref.gen,ref.alloc))
             end
         else
             #println("D $pc $(s.local_names[li])")
             haskey(s.phi_heap[obj.li], obj.pc) || return false # TODO correct ?
             phi_h = s.phi_heap[obj.li][obj.pc]
-            for pred_i = 1:length(phi_h)
-                for i=1:length(phi_h[pred_i])
-                    push!(new_heap, (obj,i,pred_i))
+            for pred_i in eachindex(phi_h)
+                for i in eachindex(phi_h[pred_i])
+                    ref = phi_h[pred_i][i]
+                    push!(new_heap, HeapRef(obj,pred_i,i,ref.gen,ref.alloc))
                 end
             end
         end
@@ -548,24 +612,45 @@ function propagate_heap!(s, heap_use, pc, into)
         curpc = obj.pc
         while curpc != pc
             if curpc == 0 || pcur <= length(p) && curpc == p[pcur][1]
-                label = find_label(s.code, curpc)
                 curpc == 0 || (curpc = p[pcur][2])
+                label = find_label(s.code, curpc)
                 #println("Going through $curpc for $pc")
                 for li = 1:length(s.local_names)
                     haskey(s.phi_heap[li], curpc) || continue
                     cur = Def(li, curpc)
                     phi_heap = s.phi_heap[li][curpc]
                     new_heap_replace = fill(0, length(new_heap))
+                    new_heap_dgen = fill(0, length(new_heap))
                     #println("phi for $(s.local_names[li]) : $phi_heap")
                     for inc in eachindex(phi_heap)
                         inc_phi_heap = phi_heap[inc]
+                        # find the index of this inc in the predecessor list
+                        phi_inc_idx = 0
+                        if label > 0
+                            phi_edges = s.defs[li].phi_edges[label]
+                            inc_pred_pc = phi_edges[inc]
+                            for k in eachindex(s.dtree.pred[label])
+                                if s.dtree.pred[label][k][2] == inc_pred_pc
+                                    phi_inc_idx = k
+                                end
+                            end
+                        end
+
                         for i in eachindex(inc_phi_heap)
                             #println("doing $inc $i")
                             cur_obj = inc_phi_heap[i]
-                            idx = findfirst(new_heap, cur_obj)
-                            if idx > 0
-                                push!(new_heap, (cur, i, inc))
-                                new_heap_replace[idx] += 1
+                            #idx = findfirst(new_heap, cur_obj)
+                            for idx in eachindex(new_heap)
+                                new_heap_ref = new_heap[idx]
+                                if cur_obj == new_heap_ref
+                                    push!(new_heap, HeapRef(cur, inc, i, cur_obj.gen, cur_obj.alloc))
+                                    new_heap_replace[idx] += 1
+                                else
+                                    haskey(s.phi_heap_gen, curpc) || continue
+                                    allocs_dgen = s.phi_heap_gen[curpc]
+                                    haskey(allocs_dgen, new_heap_ref.alloc) || continue
+                                    new_heap_dgen[idx] = max(new_heap_dgen[idx], get(allocs_dgen[new_heap_ref.alloc], phi_inc_idx, 0))
+                                end
                             end
                         end
                     end
@@ -574,8 +659,11 @@ function propagate_heap!(s, heap_use, pc, into)
                     n_del = 0
                     for i in eachindex(new_heap_replace)
                         if new_heap_replace[i] == n_inc
+                            @assert(new_heap_dgen[i] == 0)
                             new_heap[i] = new_heap[end-n_del]
                             n_del += 1
+                        else
+                            new_heap[i] = birthday(new_heap[i], new_heap_dgen[i] == MAX_GEN_ALLOC ? MAX_GEN : new_heap_dgen[i])
                         end
                     end
                     resize!(new_heap, length(new_heap) - n_del)
@@ -586,22 +674,26 @@ function propagate_heap!(s, heap_use, pc, into)
                     pcur += 1
                 end
             else
-                cur = Def(0, curpc)
-                cur_heap = heap_for(s, cur)
-                for i = 1:length(cur_heap)
-                    cur_obj = cur_heap[i]
-                    idx = findfirst(new_heap, cur_obj)
-                    idx > 0 && (new_heap[idx] = (cur, i, 0))
+                if curpc != obj.pc
+                    cur = Def(0, curpc)
+                    cur_heap = heap_for(s, cur)
+                    for i = 1:length(cur_heap)
+                        cur_obj = cur_heap[i]
+                        for idx in eachindex(new_heap)
+                            new_heap_ref = new_heap[idx]
+                            if new_heap_ref == cur_obj
+                                new_heap[idx] = HeapRef(cur, 0, i, cur_obj.gen, cur_obj.alloc)
+                            elseif new_heap_ref.alloc == curpc
+                                new_heap[idx] = birthday(new_heap[idx], 1)
+                            end
+                        end
+                    end
                 end
                 curpc += 1
             end         
         end
-
         for obj in new_heap
-            if !(obj in into)
-                push!(into, obj)
-                chgd = true
-            end
+            chgd |= heap_add!(into, obj)
         end
     end
     chgd
@@ -610,22 +702,25 @@ end
 function restrict_heap_ref(s, h, pc)
     pclabel = find_label(s.code, pc)
     pcdepth = dom_depth(s.dtree, pclabel)
+    gen = h.gen
     @assert pcdepth >= 0
     while true
         #        @show h
-        hdef, hid, hinc = h
-        hlabel = find_label(s.code, hdef.pc)
+        hlabel = find_label(s.code, h.def.pc)
         hdepth = dom_depth(s.dtree, hlabel)
         @assert hdepth >= 0
-        if hid == 0 || hdepth < pcdepth || hdepth == pcdepth && hdef.pc < pc
+        if h.ref_idx == 0 || hdepth < pcdepth || hdepth == pcdepth && h.def.pc < pc
+            if h.ref_idx == 0
+                h = birthday(h, gen-h.gen)
+            end
             return h
         end
         #        @show hdef h pc
         #@show hinc hid
-        if hdef.li == 0
-            h = s.heap[hdef.pc][hid]
+        if h.def.li == 0
+            h = s.heap[h.def.pc][h.ref_idx]
         else
-            h = s.phi_heap[hdef.li][hdef.pc][hinc][hid]
+            h = s.phi_heap[h.def.li][h.def.pc][h.inc][h.ref_idx]
         end
     end
 end
@@ -638,12 +733,67 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         if !(lsd.name in s.local_names)
             li = add_local!(s, lsd.name)
             s.phis[li][0] = bot(V)
-            s.phi_heap[li][0] = HeapRef[Tuple{Def,Int,Int}[]]
+            s.phi_heap[li][0] = HeapRefs[HeapRef[]]
         end
     end
     # update phis
     lbl = findfirst(s.code.label_pc, pc)
     if lbl > 0
+        lbl_depth = s.dtree.depth[lbl]
+        idom_lbl,idom_pc = s.dtree.idom[lbl]
+        # update phi heapgens
+        dgens = Dict{Int,Int}()
+        for (pred_i,(pred_lbl,pred_pc)) in enumerate(s.dtree.pred[lbl])
+            last_statements = (pred_lbl == 0 || pred_lbl == idom_lbl)
+            println("Update of $pc: $pred_lbl @ $pred_pc | $idom_lbl @ $idom_pc")
+            # count allocations up the dom tree
+            while pred_lbl != 0 && pred_lbl != idom_lbl || last_statements
+                # count allocation in this EBB
+                pred_entry_pc = last_statements ? idom_pc : s.code.label_pc[pred_lbl]
+                lb,ub = searchsortedfirst(s.allocs, pred_entry_pc), searchsortedlast(s.allocs, pred_pc)
+                for i = lb:ub
+                    alloc = s.allocs[i]
+                    dgens[alloc] = get!(dgens, alloc, 0) + 1
+                end
+                println("LBUB $lb $ub $dgens")
+                if last_statements
+                    last_statements = false
+                else
+                    if haskey(s.phi_heap_gen, pred_entry_pc)
+                        for (alloc,inc_dgens) in s.phi_heap_gen[pred_entry_pc]
+                            dgen = 0
+                            for (inc,inc_dgen) in inc_dgens
+                                dgen = max(dgen, inc_dgen)
+                            end
+                            dgens[alloc] = get!(dgens, alloc, 0) + dgen
+                        end
+                    end
+                    pred_lbl,pred_pc = s.dtree.idom[pred_lbl]
+                    if pred_lbl == -1
+                        # this predecessor is unreachable so has no idom and can be ignored
+                        @goto skip_pred
+                    end
+                    if pred_lbl == 0 || pred_lbl == idom_lbl
+                        last_statements = true
+                    end
+                end
+            end
+            for (alloc,dgen) in dgens
+                dgen > 0 || continue # should not happen but well
+                alloc_dgens = get!(s.phi_heap_gen, pc, Dict{Int,Dict{Int,Int}}())
+                inc_dgens = get!(alloc_dgens, alloc, Dict{Int,Int}())
+                inc_dgen = get!(inc_dgens, pred_i, 0)
+                dgen = min(MAX_GEN_ALLOC, dgen)
+                if dgen != inc_dgen
+                    inc_dgens[pred_i] = dgen
+                    chgd = true
+                end
+            end
+            @label skip_pred
+            empty!(dgens)
+        end
+        #@show pc get(s.phi_heap_gen, pc, ())
+        
         for li = 1:length(s.local_names)
             k = s.local_names[li]
             # TODO only join the changed incoming edges
@@ -660,21 +810,18 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                 end
 
                 # update heap refs
-                phi_heap = get!(s.phi_heap[li], pc, Array(HeapRef,0))
+                phi_heap = get!(s.phi_heap[li], pc, Array(HeapRefs,0))
                 #println("Updating ϕ $k at $pc : ", s.defs[li].phis[lbl])
-                for (i,pred) in enumerate(s.defs[li].phis[lbl])
+                for (i,pred) in enumerate(s.defs[li].phi_edges[lbl])
                     if length(phi_heap) < i
                         @assert length(phi_heap) == i-1
-                        push!(phi_heap, Array(Tuple{Def,Int,Int},0))
+                        push!(phi_heap, Array(HeapRef,0))
                     end
-                    additional = Array(Tuple{Def,Int,Int},0)
+                    additional = Array(HeapRef,0)
                     propagate_heap!(s, Any[k], pred, additional)
                     for ref in additional
                         ref = restrict_heap_ref(s, ref, inter_idom(s.code, s.dtree, pc, pred))
-                        if !(ref in phi_heap[i])
-                            push!(phi_heap[i], ref)
-                            chgd = true
-                        end
+                        chgd |= heap_add!(phi_heap[i], ref)
                     end
                 end
             end
@@ -686,13 +833,18 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         li = findfirst(s.local_names, d[idx].name)
         @assert li > 0
         @assert(pc != 0 && !(pc in s.code.label_pc))
-        chgd |= add_def!(s.code, s.dtree, s.defs[li], pc, d[idx].saval)
+        chgd |= add_def!(s.code, s.dtree, s.defs[li], pc)
     end
 
     # heap
     if :new in sd.heap_use
-        if !((Def(0, pc),0,0) in s.heap[pc])
-            push!(s.heap[pc], (Def(0, pc), 0, 0))
+        ref = HeapRef(Def(0,pc),0,0,0,pc)
+        if !(ref in s.heap[pc])
+            push!(s.heap[pc], ref)
+            #s.heapref_gen[HeapRef(Def(0,pc),0,length(s.heap[pc]))] = 0
+            @assert(!(pc in s.allocs))
+            insert!(s.allocs, searchsortedfirst(s.allocs, pc), pc)
+            @assert(issorted(s.allocs))
             chgd = true
         end
         filter!(t -> t !== :new, sd.heap_use)
@@ -728,24 +880,7 @@ function eval_local!{V}(s::LocalStore{V}, sd, pc::Int, name::LocalName)
             def = find_def_fast(s.code, s.dtree, ds, pc)
             #println("Before def $name : $def $(sd.heap_use) at $pc")
             sd.heap_use = Any[name]#(name, def[2])
-            val = eval_def(s, idx, def[2])#def[2] > 0 ? s.sa[def[2]] : bot(V)
-            #end
-            #@show vals
-            #if all(vals .> 0)
-            #    ssaval = reduce(join,map(i->s.sa[i],vals))
-            #if val == locval
-            #else
-                #=@show pc s.code.label_pc
-                @show s.defs[idx] def
-                @show s.defs[idx].vals
-                @show val locval
-                @show s.code.dtree.front
-                @show s.code=#
-                #error()
-            #    end
-            #end
-
-            
+            val = eval_def(s, idx, def[2])
         catch
             println("Error while evaling $name")
             @show s.defs[idx] def s.defs[idx].vals
@@ -822,12 +957,12 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         ls.phis[li][0] = is.args[i]
         
         heap = is.heap[k]
-        refs = Array(Tuple{Def,Int,Int},0)
+        refs = Array(HeapRef,0)
         for init_ref in heap
             arg_i, ref_i = init_ref
-            push!(refs, (Def(args_li[arg_i], 0), ref_i, 1))
+            push!(refs, HeapRef(Def(args_li[arg_i], 0), 1, ref_i, 0, 0))
         end
-        ls.phi_heap[li][0] = HeapRef[refs]
+        ls.phi_heap[li][0] = HeapRefs[refs]
         
         k+=1
     end
@@ -837,12 +972,12 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         
         args_li[k] = li
         heap = is.heap[k]
-        refs = Array(Tuple{Def,Int,Int},0)
+        refs = Array(HeapRef,0)
         for init_ref in heap
             arg_i, ref_i = init_ref
-            push!(refs, (Def(args_li[arg_i], 0), ref_i, 1))
+            push!(refs, HeapRef(Def(args_li[arg_i], 0), 1, ref_i, 0, 0))
         end
-        ls.phi_heap[li][0] = HeapRef[refs]
+        ls.phi_heap[li][0] = HeapRefs[refs]
         k+=1
     end
     for i = 1:length(is.tenv)
@@ -851,12 +986,12 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         
         args_li[k] = li
         heap = is.heap[k]
-        refs = Array(Tuple{Def,Int,Int},0)
+        refs = Array(HeapRef,0)
         for init_ref in heap
             arg_i, ref_i = init_ref
-            push!(refs, (Def(args_li[arg_i], 0), ref_i, 1))
+            push!(refs, HeapRef(Def(args_li[arg_i], 0), 1, ref_i, 0, 0))
         end
-        ls.phi_heap[li][0] = HeapRef[refs]
+        ls.phi_heap[li][0] = HeapRefs[refs]
         k+=1
     end
 end
@@ -926,10 +1061,13 @@ function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
         fs.must_throw &= sd.must_throw
         chgd = true
     end
-    l = length(fs.ret_sa)
-    push!(fs.ret_sa, pc) # TODO not sure about pc in general (exceptions ?)
-    if l != length(fs.ret_sa)
-        chgd = true
+    if !sd.must_throw
+        @assert(isbot(sd.thrown), "throwing $(sd.thrown) in return trace") # should have split the throwing trace by now
+        l = length(fs.ret_sa)
+        push!(fs.ret_sa, pc)
+        if l != length(fs.ret_sa)
+            chgd = true
+        end
     end
     ls = s.funs[fc]
     code = ls.code
@@ -938,22 +1076,21 @@ function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
         refs = ls.heap[sa]
         for ref in refs
             while true
-                def,refi,inc = ref
-                if refi == 0
+                if ref.ref_idx == 0
                     push!(fs.heap, 0)
                     break
                 end
-                if def.li == 0
-                    ref = ls.heap[def.pc][refi]
+                if ref.def.li == 0
+                    ref = ls.heap[ref.def.pc][ref.ref_idx]
                 else
-                    if def.pc == 0
-                        idx = findfirst(initial.heap_li, def.li)
+                    if ref.def.pc == 0
+                        idx = findfirst(initial.heap_li, ref.def.li)
                         if idx > 0
                             push!(fs.heap, idx)
                             break
                         end
                     end
-                    ref = ls.phi_heap[def.li][def.pc][inc][refi]
+                    ref = ls.phi_heap[ref.def.li][ref.def.pc][ref.inc][ref.ref_idx]
                 end
             end
         end
@@ -990,7 +1127,7 @@ function register_fun!(sched::Scheduler, fcode::Code, initial::InitialState)
 end
 
 function Base.show(io::IO,t::Thread)
-    println(io, "abstract thread ", pointer_from_objref(t), " at ",t.fc,":",t.pc, " final:")
+    println(io, "abstract thread ", pointer_from_objref(t), " at ",t.fc,":",t.pc)
 end
 fork(s,t) = fork(s,t,t.pc)
 fork(s,t,pc) = fork(s,t,pc)
@@ -1124,7 +1261,7 @@ call_gate(f,v::ConstCode) = v
 call_gate(f,p::Prod) = prod(map(v->call_gate(f,v),p.values))
 NOMETH = 0
 
-function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector{V},env, args_heap::Vector{Any})
+function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,env,args::Vector{V},args_sa::Vector{Int})
     child = Thread(0,1)
     args = map(a -> call_gate(fcode, a), args)
     initial = InitialState(V, fcode)
@@ -1132,9 +1269,9 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
     if fcode.isva
         narg -= 1
         vargs = args[narg+1:end]
-        vargs_heap = args_heap[narg+1:end]
+        vargs_sa = args_sa[narg+1:end]
         args = args[1:narg]
-        args_heap = args_heap[1:narg]
+        args_sa = args_sa[1:narg]
     end
     if narg != length(args)
         DEBUGWARN && warn(@sprintf("Wrong arg count for %s : %s vs %s%s", fcode, fcode.args, args, fcode.isva ? " (vararg)" : ""))
@@ -1156,7 +1293,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         initial.args[i] = arg
     end
     if fcode.isva
-        tup = eval_call!(sched, child, sd, convert(V,Const(Base.tuple)), vargs, vargs_heap)
+        tup = eval_call!(sched, child, sd, convert(V,Const(Base.tuple)), 1, vargs, vargs_sa) # TODO wrong
         @assert tup !== nothing
         initial.args[narg+1] = tup
     end
@@ -1170,16 +1307,16 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         end
         initial.tenv[div(i+1,2)] = aval
     end
-    length(env) == length(fcode.capt) || warn(@sprintf("Wrong env size %d vs %d : %s vs %s", length(env), length(fcode.capt), env, fcode.capt))
+    DEBUGWARN && (length(env) == length(fcode.capt) || warn(@sprintf("Wrong env size %d vs %d : %s vs %s", length(env), length(fcode.capt), env, fcode.capt)))
     for i=1:length(fcode.capt)
         val = i > length(env) ? top(V) : convert(V,env[i])
         initial.capt[i] = val
     end
-    #@show args_heap initial.args
-    heaprefs = [Array(Tuple{Def,Int,Int},0) for i = 1:(length(initial.args) + length(initial.capt) + length(initial.tenv))]
+    #@show args_sa initial.args
+    heaprefs = [Array(HeapRef,0) for i = 1:(length(initial.args) + length(initial.capt) + length(initial.tenv))]
     if t.fc > 0
         callee_heaprefs = initial.heap
-        for (i,arg) in enumerate(args_heap)
+        for (i,arg) in enumerate(args_sa)
             #@show heaprefs i
             propagate_heap!(sched.states.funs[t.fc], Any[arg], t.pc, heaprefs[i])
             some_not_found = false
@@ -1212,7 +1349,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         nobj = Set{Any}()
         nupref = Set{Any}()
         has_arg = false
-        for (i,arg) in enumerate(args_heap)
+        for (i,arg) in enumerate(args_sa)
             if arg in obj
                 has_arg = true
                 push!(nobj, fcode.args[i])
@@ -1247,7 +1384,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,args::Vector
         heappush!(sched.threads, child)
     end
     if t.fc > 0
-        sched.states.funs[t.fc].heap_uprefs[t.pc,fc] = args_heap# TODO assert empty ?
+        sched.states.funs[t.fc].heap_uprefs[t.pc,fc] = args_sa# TODO assert empty ?
     end
     
     push!(t.wait_on, fc)
@@ -1265,18 +1402,24 @@ function eval_call!{V,S}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::I
         stack[i] = eval_local(sched.states,t.fc,t.pc,args[i])
     end
     f = eval_local(sched.states,t.fc,t.pc,fun)
-    sd.value = eval_call!(sched, t, sd, f, stack, Any[args...])
+    sd.value = eval_call!(sched, t, sd, f, fun, stack, args)
 end
 
-function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V, args::Vector{V}, args_heap::Vector{Any})
+function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{V}, fun::V, fun_sa::Int, args::Vector{V}, args_sa::Vector{Int})
+    eval_call_values!(sched, t, sd, V, fun, args)
+end
+
+function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V, fun_sa::Int, args::Vector{V}, args_sa::Vector{Int})
     (isbot(fun) || any(isbot, args)) && (#=println("bot arg ", args); =#return bot(V))
     f = convert(Const,fun)
     if f <= Const(Base._apply)
         actual_args = V[]
         if args[2] <= Ty(Function) # handle the strange _apply semantics
             fun = args[2]
+            fun_sa = args_sa[2]
         else
             fun = args[1]
+            fun_sa = args_sa[1]
             push!(actual_args, args[2])
         end
         for i=3:length(args)
@@ -1292,7 +1435,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
             end
         end
         args = actual_args
-        args_heap = Any[1 for _ in actual_args]
+        args_sa = Int[1 for _ in actual_args] # TODO wrong
     end
     
     # actually do the call
@@ -1300,7 +1443,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
     cc = convert(ConstCode,fun)
     # known lambda
     if !istop(cc)
-        eval_call_code!(sched, t, cc.v, args, cc.env, args_heap)
+        eval_call_code!(sched, t, cc.v, cc.env, args, args_sa)
         return bot(V)
     end
 
@@ -1310,8 +1453,9 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
         f = cf.v
         if !isa(f,Function)
             f = getfield(sched.funs[t.fc].mod, :call) # call overloading
+            fun_sa = -1 # TODO wrong
             unshift!(args, fun)
-            unshift!(args_heap, 1) # TODO get f heap
+            unshift!(args_sa, 1) # TODO wrong
         end
 
         argtypes = to_signature(args)
@@ -1320,7 +1464,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
             for meth in meths
                 cc = code_for_method(meth, argtypes)
                 istop(cc) && return top(V) # TODO unknown effects
-                eval_call_code!(sched, t, cc.v, args, cc.env, args_heap)
+                eval_call_code!(sched, t, cc.v, cc.env, args, args_sa)
             end
             return bot(V)
         else
@@ -1345,13 +1489,15 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
             if known_ccall !== nothing
                 args = args[4:end][1:2:end]
                 fun = convert(V, Const(known_ccall))
+                fun_sa = -1 # TODO wrong
             end
         end
         if f <= Const(Base._expr)
             fun = convert(V,Const(OtherBuiltins.new))
+            fun_sa = -1 # TODO wrong
             unshift!(args, convert(V,Const(Base.Expr)))
         end
-        result = eval_call_values!(sched, t, sd, V, fun, args)
+        result = eval_call_values!(sched, t, sd, V, fun, fun_sa, args, args_sa)
         #=if !istop(convert(Const, fun)) && istop(result) && !any(istop, args)
         warn(@sprintf("Top result for %s %s", fun, args))
         end=#
@@ -1667,8 +1813,9 @@ function eval_call_values!{V,EV}(sched::Scheduler, t::Thread, sd::StateDiff, ::T
         (istop(ty) || ty.v !== Function) && return top(V)
         code = convert(Const, args[2])
         istop(code) && return top(V)
-        actual_code = code_from_ast(code.v, (), Tuple)
-        env = map(capt -> convert(EV,capt), args[3:end])
+        # TODO do an actual nested tparam thing instead of this hack
+        actual_code = code_from_ast(code.v, sched.funs[t.fc].tvar_mapping, Tuple)
+        env = map(capt -> ((code,);convert(EV,capt)), args[3:end])
         return convert(V,ConstCode(EV, actual_code, tuple(env...)))
     end
     top(V)
@@ -1705,7 +1852,7 @@ function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
         @assert(false, "Jeff said raw symbols where gone, so what is $e ? :(")
     end
 end
-StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, Any[:globalX])
+StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, Any[:global])
 function Base.copy{V,TV}(sd::StateDiff{V,TV})
     StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw, copy(sd.heap_use))
 end
@@ -1861,9 +2008,12 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             next_pc = handler
             push!(sd.locals, exc_sd)
             sd.value = bot(V)
-        else
+        else # split into a must_throw trace & a non throwing one
             branch_sd = copy(sd)
+            sd.must_throw = false
+            sd.thrown = bot(V)
             branch_sd.value = bot(V)
+            branch_sd.must_throw = true
             push!(branch_sd.locals, exc_sd)
         end
         if handler in code.label_pc
@@ -1927,7 +2077,7 @@ function step!(s::Scheduler)
         tpc = t.pc
         step!(s, t, s.config)
     catch x
-        println("Exception while executing ", t, " :")
+        println("Exception while executing ", t, " function ", s.funs[t.fc], " : ")
         println(x)
         println("Function : ", s.funs[t.fc])
         rethrow(x)
@@ -2075,6 +2225,9 @@ const HIT = [0,0,0]
 const _code_cache = ObjectIdDict()#Dict{Any,Code}()
 const SR = []
 
+function tenv_from_ast(ast)
+    
+end
 function capt_from_ast(ast)
     if !isa(ast,Expr)
         ast = Base.uncompressed_ast(ast)
@@ -2191,7 +2344,9 @@ end
 const _staged_cache = ObjectIdDict()#Dict{Any,Any}()
 
 function accumulate_heap!(ls, href, into)
-    def,refi,inc = href
+    def = href.def
+    refi = href.ref_idx
+    inc = href.inc
     push!(into, def)
     if refi == 0
         return
@@ -2221,7 +2376,7 @@ function print_code(io, sched, fc)
             for obj in ls.heap[i]
                 accumulate_heap!(ls, obj, h)
             end
-            #h = ls.heap[i]
+            h = ls.heap[i]
             print(io, "\t[", Base.join([sprint(show, hr) for hr in h], " "), "]")
             print(io, "\t")
         end
@@ -2303,7 +2458,7 @@ function run(f::Function, args)
     end
     empty!(_code_cache)
     t = Thread(0,0)
-    eval_call!(sched, t, StateDiff(t,Analysis.ValueT,Ty), convert(Analysis.ValueT,Const(f)), Analysis.ValueT[args...], Any[:globalR for _ in args])
+    eval_call!(sched, t, StateDiff(t,Analysis.ValueT,Ty), convert(Analysis.ValueT,Const(f)), 1, Analysis.ValueT[args...], Int[1 for _ in args]) # TODO wrong
     dt = @elapsed begin
         niter,maxthr = run(sched)
     end
