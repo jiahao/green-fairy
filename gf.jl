@@ -431,51 +431,66 @@ function Base.show(io::IO, d::Def)
     end
     print(io, ")")
 end
-# TODO this struct is probably used a lot
-# and could maybe benefit from tighter packing
-# e.g. age is small, inc is likely to also be
-immutable HeapRef
+immutable HeapLoc
     def :: Def # link to the alias tree
     inc :: Int # if refers to a phi, the incoming branch, else 0
     ref_idx :: Int # or 0 if it is an allocation
-    gen :: Int
-    alloc :: Int
 end
+# TODO this struct is used a lot
+# and could maybe benefit from tighter packing
+# e.g. age is small, inc is likely to also be
+immutable HeapRef
+    loc :: HeapLoc
+    gen :: UInt8
+    alloc :: Int
+    outside :: Bool
+end
+
 function Base.show(io::IO, hr::HeapRef)
-    print(io, "(ref:", hr.def)
-    if hr.ref_idx == 0
+    print(io, "(ref:", hr.loc.def)
+    if hr.loc.ref_idx == 0
         print(io, " new")
     else
-        print(io, " ", hr.ref_idx)
+        print(io, " ", hr.loc.ref_idx)
     end
-    if hr.def.li != 0
-        print(io, " inc:", hr.inc)
+    if hr.loc.def.li != 0
+        print(io, " inc:", hr.loc.inc)
     end
     print(io, " gen:", (hr.gen == MAX_GEN ? "∞" : hr.gen), " site:", hr.alloc, ")")
 end
-birthday(hr::HeapRef,years) = HeapRef(hr.def,hr.inc,hr.ref_idx,min(MAX_GEN,hr.gen+years),hr.alloc)
-is_just_older(hr::HeapRef,hr2::HeapRef) = (hr.def == hr2.def && hr.inc == hr2.inc && hr.ref_idx == hr2.ref_idx && hr.alloc == hr2.alloc)
-merge_older(hr::HeapRef,hr2::HeapRef) = (@assert(is_just_older(hr,hr2)); HeapRef(hr.def,hr.inc,hr.ref_idx,max(hr.gen,hr2.gen),hr.alloc))
+birthday(hr::HeapRef,years) = HeapRef(hr.loc,min(MAX_GEN,hr.gen+years),hr.alloc,hr.outside)
+is_mergeable(hr::HeapRef,hr2::HeapRef) = (hr.loc == hr2.loc && hr.alloc == hr2.alloc)
+join(hr::HeapRef,hr2::HeapRef) = (@assert(is_mergeable(hr,hr2)); HeapRef(hr.loc ,max(hr.gen,hr2.gen),hr.alloc,hr.outside | hr2.outside))
 
 typealias HeapRefs Vector{HeapRef}
 
 const MAX_GEN = 5
 const MAX_GEN_ALLOC = 2
 
+immutable PhiHeap
+    refs :: Vector{HeapRefs} # inc => refs
+    defs :: Dict{Int,Tuple{Int,Int}} # local => (inc,ref_id)
+end
+
 type LocalStore{V<:Lattice}
     local_names :: Vector{LocalName}
     defs :: Vector{DefStore{Set{Int}}}
+    
     sa :: Vector{V} # pc => value
     phis :: Vector{Dict{Int,V}} # local => label => phi value
+    
     len :: Int
     code :: Code
     dtree :: DomTree
+    
     heap :: Vector{HeapRefs} # pc => heap backref
     phi_heap :: Vector{Dict{Int,Vector{HeapRefs}}} # local => pc => inc => heap backref
     allocs :: Vector{Int} # sorted pcs
-    heapref_gen :: Dict{HeapRef,Int}
     phi_heap_gen :: Dict{Int,Dict{Int,Dict{Int,Int}}} # pc => alloc => inc => dgen
     heap_uprefs :: Dict{Tuple{Int,Int},Vector{Int}} # pc => callee => [upref1, ..., uprefn]
+
+    heap_fields :: Dict{HeapLoc,Dict{Symbol,Vector{HeapLoc}}}
+    
     changed :: BitVector
 end
 
@@ -490,9 +505,9 @@ function LocalStore{V}(::Type{V}, code::Code)
                [Array(HeapRef,0) for i=1:n+1],
                Array(Dict{Int,Vector{HeapRefs}}, 0),
                Array(Int,0),
-               Dict{HeapRef,Int}(),
                Dict{Int,Dict{Int,Dict{Int,Int}}}(),
                Dict{Tuple{Int,Int},Vector{Int}}(),
+               Dict{HeapLoc,Dict{Symbol,Vector{HeapLoc}}}(),
                trues(n+1))
 end
 type Thread
@@ -517,6 +532,7 @@ type StateDiff{V,TV}
     thrown :: TV
     must_throw :: Bool
     heap_use
+    heap_setfield
 end
 
 function eval_def{V}(s::LocalStore{V}, local_idx, pc)
@@ -548,8 +564,8 @@ end
 
 function heap_add!(into, obj)
     for i in eachindex(into)
-        if is_just_older(obj,into[i])
-            merged = merge_older(obj,into[i])
+        if is_mergeable(obj,into[i])
+            merged = join(obj,into[i])
             if merged != into[i]
                 into[i] = merged
                 return true
@@ -577,7 +593,6 @@ function propagate_heap!(s, heap_use, pc, into)
         elseif isa(obj, Symbol) || isa(obj, GenSym)
             li = findfirst(s.local_names, obj)
             obj = find_def_fast(s.code, s.dtree, s.defs[li], pc)[2]
-            #println("For $(s.local_names[li]) $(s.code) at $pc : $obj")
             # TODO this traverses the dom tree a second time, could be more efficient
             p = dom_path_to(s.code, s.dtree, obj, pc)
             if obj == 0 || obj in s.code.label_pc
@@ -594,7 +609,7 @@ function propagate_heap!(s, heap_use, pc, into)
         if obj.li == 0
             for i in eachindex(s.heap[obj.pc])
                 ref = s.heap[obj.pc][i]
-                push!(new_heap, HeapRef(obj,0,i,ref.gen,ref.alloc))
+                push!(new_heap, HeapRef(HeapLoc(obj,0,i),ref.gen,ref.alloc,ref.outside))
             end
         else
             #println("D $pc $(s.local_names[li])")
@@ -603,7 +618,7 @@ function propagate_heap!(s, heap_use, pc, into)
             for pred_i in eachindex(phi_h)
                 for i in eachindex(phi_h[pred_i])
                     ref = phi_h[pred_i][i]
-                    push!(new_heap, HeapRef(obj,pred_i,i,ref.gen,ref.alloc))
+                    push!(new_heap, HeapRef(HeapLoc(obj,pred_i,i),ref.gen,ref.alloc,ref.outside))
                 end
             end
         end
@@ -643,7 +658,7 @@ function propagate_heap!(s, heap_use, pc, into)
                             for idx in eachindex(new_heap)
                                 new_heap_ref = new_heap[idx]
                                 if cur_obj == new_heap_ref
-                                    push!(new_heap, HeapRef(cur, inc, i, cur_obj.gen, cur_obj.alloc))
+                                    push!(new_heap, HeapRef(HeapLoc(cur, inc, i), cur_obj.gen, cur_obj.alloc,cur_obj.outside))
                                     new_heap_replace[idx] += 1
                                 else
                                     haskey(s.phi_heap_gen, curpc) || continue
@@ -682,7 +697,7 @@ function propagate_heap!(s, heap_use, pc, into)
                         for idx in eachindex(new_heap)
                             new_heap_ref = new_heap[idx]
                             if new_heap_ref == cur_obj
-                                new_heap[idx] = HeapRef(cur, 0, i, cur_obj.gen, cur_obj.alloc)
+                                new_heap[idx] = HeapRef(HeapLoc(cur, 0, i), cur_obj.gen, cur_obj.alloc, cur_obj.outside)
                             elseif new_heap_ref.alloc == curpc
                                 new_heap[idx] = birthday(new_heap[idx], 1)
                             end
@@ -706,21 +721,21 @@ function restrict_heap_ref(s, h, pc)
     @assert pcdepth >= 0
     while true
         #        @show h
-        hlabel = find_label(s.code, h.def.pc)
+        hlabel = find_label(s.code, h.loc.def.pc)
         hdepth = dom_depth(s.dtree, hlabel)
         @assert hdepth >= 0
-        if h.ref_idx == 0 || hdepth < pcdepth || hdepth == pcdepth && h.def.pc < pc
-            if h.ref_idx == 0
+        if h.loc.ref_idx == 0 || hdepth < pcdepth || hdepth == pcdepth && h.loc.def.pc < pc
+            if h.loc.ref_idx == 0
                 h = birthday(h, gen-h.gen)
             end
             return h
         end
         #        @show hdef h pc
         #@show hinc hid
-        if h.def.li == 0
-            h = s.heap[h.def.pc][h.ref_idx]
+        if h.loc.def.li == 0
+            h = s.heap[h.loc.def.pc][h.loc.ref_idx]
         else
-            h = s.phi_heap[h.def.li][h.def.pc][h.inc][h.ref_idx]
+            h = s.phi_heap[h.loc.def.li][h.loc.def.pc][h.loc.inc][h.loc.ref_idx]
         end
     end
 end
@@ -777,7 +792,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                 end
             end
             for (alloc,dgen) in dgens
-                dgen > 0 || continue # should not happen but well
+                @assert(dgen > 0)
                 alloc_dgens = get!(s.phi_heap_gen, pc, Dict{Int,Dict{Int,Int}}())
                 inc_dgens = get!(alloc_dgens, alloc, Dict{Int,Int}())
                 inc_dgen = get!(inc_dgens, pred_i, 0)
@@ -790,7 +805,6 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             @label skip_pred
             empty!(dgens)
         end
-        #@show pc get(s.phi_heap_gen, pc, ())
         
         for li = 1:length(s.local_names)
             k = s.local_names[li]
@@ -836,10 +850,10 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
 
     # heap
     if :new in sd.heap_use
-        ref = HeapRef(Def(0,pc),0,0,0,pc)
+        ref = HeapRef(HeapLoc(Def(0,pc),0,0),0,pc,false)
+        @show ref
         if !(ref in s.heap[pc])
             push!(s.heap[pc], ref)
-            #s.heapref_gen[HeapRef(Def(0,pc),0,length(s.heap[pc]))] = 0
             @assert(!(pc in s.allocs))
             insert!(s.allocs, searchsortedfirst(s.allocs, pc), pc)
             @assert(issorted(s.allocs))
@@ -847,9 +861,28 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         end
         filter!(t -> t !== :new, sd.heap_use)
     end
-    #filter!(t -> t !== :globalZ, sd.heap_use)
     chgd |= propagate_heap!(s, sd.heap_use, pc, s.heap[pc])
-    
+
+    # heap setfield
+    for (parent,field,child) in sd.heap_setfield
+        field = convert(Const,field)
+        @assert(!istop(field))
+        field = field.v
+        parent_heap = Array(HeapRef,0)
+        propagate_heap!(s, Any[parent], pc, parent_heap)
+        child_heap = Array(HeapRef,0)
+        propagate_heap!(s, Any[child], pc, child_heap)
+        for parent_ref in parent_heap
+            parent_loc = parent_ref.loc
+            fields = get!(s.heap_fields, parent_loc, Dict{Symbol,Vector{HeapLoc}}())
+            field_targets = get!(fields, field, Array(HeapLoc,0))
+            for child_ref in child_heap
+                push!(fields[field], child_ref.loc)
+            end
+        end
+    end
+
+    # single assignment value
     sa = sd.sa_name
     if sa > 0
         val = s.sa[sa]
@@ -958,7 +991,7 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         refs = Array(HeapRef,0)
         for init_ref in heap
             arg_i, ref_i = init_ref
-            push!(refs, HeapRef(Def(args_li[arg_i], 0), 1, ref_i, 0, 0))
+            push!(refs, HeapRef(HeapLoc(Def(args_li[arg_i], 0), 1, ref_i), 0, 0, false))
         end
         ls.phi_heap[li][0] = HeapRefs[refs]
         
@@ -973,7 +1006,7 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         refs = Array(HeapRef,0)
         for init_ref in heap
             arg_i, ref_i = init_ref
-            push!(refs, HeapRef(Def(args_li[arg_i], 0), 1, ref_i, 0, 0))
+            push!(refs, HeapRef(HeapLoc(Def(args_li[arg_i], 0), 1, ref_i), 0, 0, false))
         end
         ls.phi_heap[li][0] = HeapRefs[refs]
         k+=1
@@ -987,7 +1020,7 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         refs = Array(HeapRef,0)
         for init_ref in heap
             arg_i, ref_i = init_ref
-            push!(refs, HeapRef(Def(args_li[arg_i], 0), 1, ref_i, 0, 0))
+            push!(refs, HeapRef(HeapLoc(Def(args_li[arg_i], 0), 1, ref_i), 0, 0, false))
         end
         ls.phi_heap[li][0] = HeapRefs[refs]
         k+=1
@@ -1074,21 +1107,21 @@ function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
         refs = ls.heap[sa]
         for ref in refs
             while true
-                if ref.ref_idx == 0
+                if ref.loc.ref_idx == 0
                     push!(fs.heap, 0)
                     break
                 end
-                if ref.def.li == 0
-                    ref = ls.heap[ref.def.pc][ref.ref_idx]
+                if ref.loc.def.li == 0
+                    ref = ls.heap[ref.loc.def.pc][ref.loc.ref_idx]
                 else
-                    if ref.def.pc == 0
-                        idx = findfirst(initial.heap_li, ref.def.li)
+                    if ref.loc.def.pc == 0
+                        idx = findfirst(initial.heap_li, ref.loc.def.li)
                         if idx > 0
                             push!(fs.heap, idx)
                             break
                         end
                     end
-                    ref = ls.phi_heap[ref.def.li][ref.def.pc][ref.inc][ref.ref_idx]
+                    ref = ls.phi_heap[ref.loc.def.li][ref.loc.def.pc][ref.loc.inc][ref.loc.ref_idx]
                 end
             end
         end
@@ -1336,34 +1369,6 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,env,args::Ve
         end
         #@show callee_heaprefs
     end
-    #=if t.fc > 0
-        heap = sched.states.funs[t.fc].heap[t.pc]
-    else
-        heap = Set{Set{Any}}([Set{Any}([:global])])
-    end
-    uprefs = Array(Set{Any},0)
-    last_up = 0
-    for obj in heap
-        nobj = Set{Any}()
-        nupref = Set{Any}()
-        has_arg = false
-        for (i,arg) in enumerate(args_sa)
-            if arg in obj
-                has_arg = true
-                push!(nobj, fcode.args[i])
-                push!(nupref, arg)
-            end
-        end
-        if has_arg && !(nobj in initial.heap)
-            last_up += 1
-            push!(nobj, Up(last_up))
-            push!(uprefs, nupref)
-        end
-        #=if :global in obj
-            push!(nobj, :global)
-        end=#
-        push!(initial.heap, nobj)
-    end=#
 
     # check for cached version of this call
     fc = 0
@@ -1403,8 +1408,8 @@ function eval_call!{V,S}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::I
     sd.value = eval_call!(sched, t, sd, f, fun, stack, args)
 end
 
-function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{V}, fun::V, fun_sa::Int, args::Vector{V}, args_sa::Vector{Int})
-    eval_call_values!(sched, t, sd, V, fun, args)
+function eval_call_values!{V,T}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{T}, fun::V, fun_sa::Int, args::Vector{V}, args_sa::Vector{Int})
+    eval_call_values!(sched, t, sd, T, fun, args)
 end
 
 function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V, fun_sa::Int, args::Vector{V}, args_sa::Vector{Int})
@@ -1447,7 +1452,7 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
 
     cf = convert(Const,fun)
     # generic function call
-    if !istop(cf) && (isa(cf.v,Function) && isgeneric(cf.v) || !isa(cf.v,Function) && !isa(cf.v,IntrinsicFunction))
+    if !istop(cf) && (isa(cf.v,Function) && isgeneric(cf.v) || !isa(cf.v,Function) && !isa(cf.v,IntrinsicFunction) && !isa(cf.v,Symbol))# TODO ugly Symbol hack for OtherBuiltins, god
         f = cf.v
         if !isa(f,Function)
             f = getfield(sched.funs[t.fc].mod, :call) # call overloading
@@ -1503,15 +1508,21 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
     end
 end
 
-function eval_new!{V}(sched::Scheduler, t::Thread, sd::StateDiff, args::V...)
-    any(isbot, args) && return bot(V)
-    sd.value = eval_call_values!(sched, t, sd, V, meet(top(V), Const(OtherBuiltins.new)), collect(args))
+function eval_new!{V}(sched::Scheduler{V}, t::Thread, sd::StateDiff, args::Vector{Int})
+    # TODO remove duplication and fix the -1 hack
+    n = length(args)
+    stack = Array(V, n)
+    for i=1:n
+        stack[i] = eval_local(sched.states,t.fc,t.pc,args[i])
+    end
+    f = meet(top(V), Const(OtherBuiltins.new))
+    sd.value = eval_call!(sched, t, sd, f, -1, stack, args)
 end
 
-@generated function eval_call_values!{Ls}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Prod{Ls}}, f::Prod{Ls}, args::Vector{Prod{Ls}})
+@generated function eval_call_values!{Ls}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Prod{Ls}}, f::Prod{Ls}, f_sa::Int, args::Vector{Prod{Ls}}, args_sa::Vector{Int})
     ex = :(top(Prod{Ls}))
     for L in Ls.types
-        ex = :(meet($ex, eval_call_values!(sched, t, sd, $L, f, args)))
+        ex = :(meet($ex, eval_call_values!(sched, t, sd, $L, f, f_sa, args, args_sa)))
     end
     ex
 end
@@ -1792,7 +1803,7 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
     end
     top(V)
 end
-function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Birth}, f::V, args::Vector{V})
+function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type{Birth}, f::V, f_sa::Int, args::Vector{V}, args_sa::Vector{Int})
     if  f <= Const(OtherBuiltins.new) ||
         f <= Const(OtherBuiltins.new_array) ||
         f <= Const(OtherBuiltins.new_array_1d) ||
@@ -1800,7 +1811,19 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
         f <= Const(OtherBuiltins.new_array_3d) ||
         f <= Const(Base.tuple)
         sd.heap_use = Any[:new]
+        typ = convert(Const,args[1])
+        @assert(!istop(typ))
+        fields = fieldnames(typ.v)
+        @show args fields typ
+        @assert(length(args) == length(fields)+1)
+        for (arg,field) in zip(args_sa[2:end], fields)
+            push!(sd.heap_setfield, (t.pc, convert(V,Const(field)), arg))
+        end
         return convert(V,Birth(t.fc,t.pc))
+    end
+    if f <= Const(Base.setfield!) && length(args) == 3
+        push!(sd.heap_setfield, (args_sa[1], args[2], args_sa[3]))
+        return args[3]
     end
     top(V)
 end
@@ -1850,9 +1873,9 @@ function eval_sym!{V}(sched::Scheduler{V},t,sd,code,e)
         @assert(false, "Jeff said raw symbols where gone, so what is $e ? :(")
     end
 end
-StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, Any[:global])
+StateDiff(t,LV,TV) = StateDiff{LV,TV}(t,Array(LocalStateDiff{LV},0), -1, Array(Int,0), bot(LV), bot(TV), false, Any[:global], Any[])
 function Base.copy{V,TV}(sd::StateDiff{V,TV})
-    StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw, copy(sd.heap_use))
+    StateDiff{V,TV}(sd.t, copy(sd.locals), sd.sa_name, copy(sd.lost), sd.value, sd.thrown, sd.must_throw, copy(sd.heap_use), copy(sd.heap_setfield))
 end
 
 function may_throw!(sd :: StateDiff, v)
@@ -1934,8 +1957,8 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
         args = code.call_args[t.pc]
         if e.head === :new
-            args = map(i -> eval_local(sched.states,t.fc,t.pc,i), code.call_args[t.pc])
-            eval_new!(sched, t, sd, args...)
+            #args = map(i -> eval_local(sched.states,t.fc,t.pc,i), code.call_args[t.pc])
+            eval_new!(sched, t, sd, collect(args))
         else
             eval_call!(sched, t, sd, args[1], args[2:end])
         end
@@ -2342,9 +2365,9 @@ end
 const _staged_cache = ObjectIdDict()#Dict{Any,Any}()
 
 function accumulate_heap!(ls, href, into)
-    def = href.def
-    refi = href.ref_idx
-    inc = href.inc
+    def = href.loc.def
+    refi = href.loc.ref_idx
+    inc = href.loc.inc
     push!(into, def)
     if refi == 0
         return
