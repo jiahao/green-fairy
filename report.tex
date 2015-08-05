@@ -39,7 +39,7 @@
 \newcommand{\oS}{\overline{\mathcal{S}}}
 \newcommand{\ra}{\rightarrow}
 \newcommand{\lfp}{\text{lfp}}
-\title{\vspace{-5ex}A modular abstract interpreter for Julia \\ MPRI Internship report}
+\title{\vspace{-5ex}A modular abstract interpreter for Julia \\ MPRI internship report}
 \author{Oscar Blumberg, supervised by Prof.\@ Alan Edelman, MIT}
 \date{2015}
 \begin{document}
@@ -50,7 +50,7 @@
 \vspace{2ex}
 \subsection*{General context}
 
-Julia is a dynamically typed, JIT compiled, programming language implementation with an emphasis on generic programming through a powerful -- and ubiquitous -- symmetric, dynamic multiple dispatch mechanism. It achieves run-time performance untypical of other similar dynamic languages by relying heavily on static analysis and aggressive specialization. It is meant to provide a tool for scientific computations that is both familiar and fast enough for this demanding usage. The julia compiler provides a wide range of meta programming and code generation techniques to the advanced user.
+Julia is a dynamically typed, JIT compiled, programming language implementation with an emphasis on generic programming through a powerful -- and ubiquitous -- symmetric, dynamic multiple dispatch mechanism. It achieves run-time performance untypical of other similar dynamic languages by relying heavily on static analysis and aggressive code specialization. It is meant to provide a tool for scientific computations that is both familiar and fast enough for this demanding usage. The julia compiler provides a range of meta programming and code generation techniques to the advanced user.
 
 Efforts into optimizing dynamic languages are not new, as the common lisp tradition shows, and more recently the sizable effort into making various javascript engines high performance. Julia has the interesting advantage of having been designed from the ground up to be a good analysis target and, while being dynamic, avoids pathological behavior patterns that are very hard to infer statically.
 
@@ -58,7 +58,7 @@ Efforts into optimizing dynamic languages are not new, as the common lisp tradit
 
 Most optimizations in the julia compiler are done by the LLVM library in the backend. LLVM is a widely used, production-grade compiler and generally generates excellent machine code. However, its intermediate representation operates at an abstraction level comparable to that of C.
 
-Some program optimizations would be better performed on the much higher level semantic that julia code exhibits earlier in the compilation pipeline. A big factor of the additional complexity the backend has to deal with is due to the integration between the generated code and the run-time : dynamic memory allocation, garbage collection, dynamic dispatch call-sites, ...
+Some program optimizations would be better performed on the much higher level semantic that julia code exhibits earlier in the compilation pipeline. A big factor of the additional complexity the backend has to deal with is due to the integration between the generated code and the various run-time systems : dynamic memory allocation, garbage collection, dynamic dispatch call-sites, ...
 
 At the julia level, all those operations are implicit and the allowed behaviors are much more restricted : it has no interior pointers, no stack escape, memory operations cannot trap, type-punning is forbidden, ... It makes some analysis much easier, alias and shape analysis being good examples.
 
@@ -67,9 +67,9 @@ At the julia level, all those operations are implicit and the allowed behaviors 
 
 As the main project of this internship, an extensible static analysis library for Julia was started. Dubbed the \emph{Green fairy}, it is written itself in Julia. The exposed interface is that of an abstract interpreter, providing an intuitive model for program behavior inference.
 
-It uses a spatially-sparse representation of the interpreter state enabling scalability across large programs. The main value domain is an extensible generic implementation of the reduced product construction, making it reasonably easy to add new value models.
+It uses a spatially-sparse representation of the interpreter state enabling scalability across large programs. The main value domain is an extensible generic implementation of the reduced product construction, making it reasonably easy to extend it with new models.
 
-It also features a work-in-progress interprocedural flow sensitive shape analysis, based on Static Shape Graphs [?]. The shape analysis uses a sparse representation as well, and an optimistic but conservative model of aliasing information for the unknown parts of the heap that allows it treat gracefully the usual problem of the cost of context sensitivity.
+It also features a work-in-progress interprocedural flow-sensitive shape analysis, based on Static Shape Graphs [?]. The shape analysis uses a sparse representation as well, and an optimistic but conservative model of aliasing information for the unknown parts of the heap that allows it to treat gracefully the usual problem of the cost of context sensitivity.
 
 The implementation is available as an ongoing work at [?]. It is already capable of applying both value-level (currently constant propagation and type inference) and shape analysis to a significant body of julia code.
 
@@ -86,7 +86,7 @@ A consequent amount of technical work has to be done to make the later stages of
 
 In particular, we plan to implement a memory reuse optimization using the shape analysis results to provide precise no-escape information that will allow memory reuse and stack allocation, greatly reducing the load on the garbage collector and the dynamic allocator.
 
-In the longer term, the natural extension to this work is devising an intuitive interface that makes it possible for users with no specific a priori knowledge of compilation and computer science to extend the abstract state of the interpreter with domain-specific informations. We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use.
+In the longer term, the natural extension to this work is to devise an intuitive interface that makes it possible for users with no specific a priori knowledge of compilation and computer science to extend the abstract state of the interpreter with domain-specific informations. We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use.
 
 Those points are developped further along in the report.
 
@@ -255,7 +255,7 @@ The following features complicate the implementation but will be ignored in this
 \item Exception handling. Even though special care was taken to handle it with complete precision (assuming of course precise throw-site information).
 \item Captured variable assigned to in inner closure scope.
 \item Function calls with variable number of arguments, or ``splatting''.
-\item (probably something else ?)
+\item (probably some other things ?)
 \end{itemize}
 
 A function in Julia is in fact a collection of methods, partially ordered by their signature types as a sub-lattice of the type lattice.
@@ -272,7 +272,7 @@ Another advantage of EBBs is that the dynamic addition of outbound control flow 
 The Green fairy is oriented towards building flow-sensitive analysis, that is, it provides information dependent on the program point.
 A simple way to implement a flow-sensitive computation is to store a dense mapping of program points to interpreter state. It has the benefit of being oblivious to the structure of said state.
 However, as the state or the analyzed program gets larger, there is a growing cost associated to the copying of those state atoms.
-In the vast majority of cases, the states at two nearby program points is highly redundant and taking advantage of this redundancy can lead to consequent improvements in analysis performance. Exploiting this so-called \emph{spatial} sparsity of the state space is an important design point of the Green fairy.
+In the vast majority of cases, the states at two nearby program points is highly redundant and taking advantage of this redundancy can lead to consequent improvements in analysis performance. Exploiting this so-called \emph{spatial} sparsity of the state space is an important design point of our implementation.
 
 There is another related kind of sparsity, that is sometimes called \emph{temporal}, where the analyzer benefits from knowledge of state dependencies to avoid recomputing transfer operators that only use unchanged subset of the state. It allows the interpreter to make results from computation flow directly into use sites. In the current implementation we do not use temporal sparsity, mainly due to a combination of time constraints and soundness concerns, although care was taken to ensure the feasability of this optimization in the future.
 
@@ -346,6 +346,7 @@ We have not yet witnessed this process to be a bottleneck. Would it become the c
 
 \section*{I can see the future}
 
+[technical/impl things] [backward analysis?] [abstract debugger]
 
 We briefly hinted at domain-specific optimizations in the introduction.
 Our long term plan is to provide hooks in the compiler and the analyzer to allow for user defined analysis and optimization.
