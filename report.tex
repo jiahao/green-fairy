@@ -1,34 +1,19 @@
-\documentclass[14pt]{article}
+\documentclass[11pt]{article}
 \usepackage{fullpage}
 \usepackage{amsmath}
 \usepackage{amsfonts}
 \usepackage{setspace}
 \usepackage{listings}
 \usepackage{verbatim}
-%\usepackage{algorithmicx}
-%\usepackage[]{algorithm2e}
-%\DontPrintSemicolon
-%\SetKwFor{While}{while}{}{end}
 \usepackage{algpseudocode}
 \usepackage{algorithm}
 \algblockdefx[IF]{If}{EndIf}[1]{\algorithmicif\ #1}{\algorithmicend}
 \algblockdefx[WHILE]{While}{EndWhile}[1]{\algorithmicwhile\ #1}{\algorithmicend}
-%\def\algbackskip{\hskip\dimexpr-\algorithmicindent+\labelsep}
-
 \usepackage{galois}
 \usepackage{tikz}
 \usepackage{varwidth}
 \usetikzlibrary{positioning}
 \usetikzlibrary{arrows.meta,bending,automata}
-%\usepackage{tgtermes}
-%\usepackage{txfonts}
-%\usepackage{mathptmx}
-%\usepackage{courier}
-%\usepackage{pslatex}
-%\usepackage[scaled=.90]{helvet}
-%\usepackage{lmodern}        % Latin Modern family of fonts. Very much like Computer Modern, but with many more glyphs 
-                            % (e.g., for characters with accents, glyphs, cedillas, etc)
-%\usepackage{mathpazo}
 \usepackage{pxfonts}
 \usepackage[T1]{fontenc}
 \lstdefinelanguage{julia}{
@@ -65,9 +50,9 @@
 \vspace{2ex}
 \subsection*{General context}
 
-Julia is a dynamically typed, JIT compiled, programming language implementation with an emphasis on generic programming through a powerful -- and ubiquitous -- symmetric, dynamic multiple dispatch mechanism. It achieves run-time performance untypical of other dynamic languages by relying heavily on static analysis and aggressive specialization. It is meant to provide a tool for scientific computations that is both familiar and fast enough for this demanding usage. The julia compiler provides a wide range of meta programming and code generation techniques to the advanced user.
+Julia is a dynamically typed, JIT compiled, programming language implementation with an emphasis on generic programming through a powerful -- and ubiquitous -- symmetric, dynamic multiple dispatch mechanism. It achieves run-time performance untypical of other similar dynamic languages by relying heavily on static analysis and aggressive specialization. It is meant to provide a tool for scientific computations that is both familiar and fast enough for this demanding usage. The julia compiler provides a wide range of meta programming and code generation techniques to the advanced user.
 
-Efforts into optimizing dynamic languages are not new, as the common lisp tradition shows, and more recently the sizable effort into making various javascript engines high performance. Julia has the interesting advantage of having been designed from the ground up to be a good analysis target, and, while being dynamic, avoids behavior patterns that are very hard to infer statically.
+Efforts into optimizing dynamic languages are not new, as the common lisp tradition shows, and more recently the sizable effort into making various javascript engines high performance. Julia has the interesting advantage of having been designed from the ground up to be a good analysis target and, while being dynamic, avoids pathological behavior patterns that are very hard to infer statically.
 
 \subsection*{Studied problem}
 
@@ -86,27 +71,28 @@ It uses a spatially-sparse representation of the interpreter state enabling scal
 
 It also features a work-in-progress interprocedural flow sensitive shape analysis, based on Static Shape Graphs [?]. The shape analysis uses a sparse representation as well, and an optimistic but conservative model of aliasing information for the unknown parts of the heap that allows it treat gracefully the usual problem of the cost of context sensitivity.
 
-The implementation is available as an ongoing work at [?]. It is already capable of applying both value-level and shape analysis to a significant body of julia code.
+The implementation is available as an ongoing work at [?]. It is already capable of applying both value-level (currently constant propagation and type inference) and shape analysis to a significant body of julia code.
 
 \subsection*{Arguments supporting their validity}
 
 
 
-\subsection*{Summary and future work}
+\subsection*{Future work}
 
-Besides tying up the various technical loose ends and improving the non-algorithmic bottlenecks of the implementation, we have several longer term goals.
+Besides tying up the various technical loose ends and improving the non-algorithmic bottlenecks of the implementation, we have several goals.
 
 As of today, using the information computed in the analysis to perform actual optimizations is not easy.
-A consequent amount of technical work has to be done to make the later stages of the compiler modular enough that the friction to take advantage of new information from the analysis becomes very low.
+A consequent amount of technical work has to be done to make the later stages of the compiler modular enough that the friction in taking advantage of new information from the analysis becomes much lower.
 
-The natural extension to this work is devising a natural interface that makes it possible for users and library writers with no specific a priori knowledge of compilation and computer science to extend the abstract state of the interpreter with domain-specific informations.
+In particular, we plan to implement a memory reuse optimization using the shape analysis results to provide precise no-escape information that will allow memory reuse and stack allocation, greatly reducing the load on the garbage collector and the dynamic allocator.
 
-We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use. A good example is the high-level interface to a BLAS library.
-It is much easier to use under a simple model where the output of the computation is freshly allocated memory containing the result. This avoids aliasing bugs, however it is inefficient because it does not take advantage of the specialized BLAS functions that can output the result in place. Reasonning that the two are equivalent if one of the argument (and all its aliases) are dead after the BLAS call is almost impossible to the compiler because it requires understanding of the routine, of which the core is often hand written assembly. However, the rules of the BLAS API are very regular at a high level and someone writing a wrapper for the library could easily, given the right interface, teach those rules directly to the compiler.
+In the longer term, the natural extension to this work is devising an intuitive interface that makes it possible for users with no specific a priori knowledge of compilation and computer science to extend the abstract state of the interpreter with domain-specific informations. We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use.
+
+Those points are developped further along in the report.
 
 \break
 
-\section*{What is abstract interpretation}
+\section*{What is abstract interpretation (??!!)}
 
 [probably some note somewhere on how AI is a different, more general, vocabulary for dataflow but is really the same idea]
 [expand a bit more ? it's already quite long for pedestrian stuff]
@@ -197,7 +183,7 @@ We will assume that the goal of this contrived analysis is to prove that $x$ has
 4 \mapsto & x:\{2, \dots, 1000\} \\
 \end{cases}
 \]
-but computing such result would require up to a thousand iterations. If instead we compute the values of $x$ in the sign domain, the fixed point is reached in a single loop iteration because the sign of $x$ does not change. Moreover, we would still be able to conclude since we were only interested in the resulting sign of $x$ in the first place.
+but computing this result would require up to a thousand iterations. If instead we compute the values of $x$ in the sign domain, the fixed point is reached in a single loop iteration because the sign of $x$ does not change. Moreover, we would still be able to conclude since we were only interested in the resulting sign of $x$ in the first place.
 
 Although this trivial example only deals with abstracting values, a fundamental trait of abstract interpretation is that the whole state of the program -- or rather it's interpreter -- can be abstracted in the same framework. This allows us to treat uniformly, at least on the proof level, the loss of precision due to value approximation and various other simplifications, such as context/path/flow-insensitivity or the choices of modeling for the program heap. 
 
@@ -212,7 +198,7 @@ The reduced product provides a way to formalize sharing of information between s
 
 As with all elegant formalism, abstract interpretation provides a good way to structure one's thoughts. Here, about families of static analysis. By extension, it also points towards a good way to structure the analyzer itself in a composable way.
 
-\section*{Duh}
+\section*{Dadada}
 
 The Green fairy provides a reasonably generic framework that computes the fixed point of user provided abstractions over a julia program. To give a quick example of its usage.
 \subsection*{Interval example}
@@ -260,15 +246,16 @@ We can see that the arguments can be provided in different domain than that of i
 
 Several opt-in features for value domains and their transfer functions are not described here for the sake of brevity. This includes widening, participation in the dispatch selection, state-altering actions such as exception raising and the ability to control the propagation of values over function call boundaries.
 
-\subsection*{Julia semantic}
+\subsection*{Julia's semantic}
 
-For the sake of this report, we'll consider a simplified version of the actual semantic of the so-called ``lowered-julia'' representation that the Green fairy is targeting. A function is a graph of extended basic blocks (EBB). They are defined by the property that they have a single control flow entry point as their head. Each one contains a linear succession of branches and variable assignments to literals and function calls. Expressions are unnested prior to the analysis.
+For the sake of this report, we'll consider a simplified version of the actual semantic of the so-called ``lowered-julia'' representation that the Green fairy is targeting. A function is a graph of extended basic blocks (EBB). Their defining property is to have a single control flow entry point as their head. Each one contains a linear succession of branches and variable assignments to literals and function calls. Expressions are unnested prior to the analysis.
 
 The following features complicate the implementation but will be ignored in this presentation :
 \begin{itemize}
 \item Exception handling. Even though special care was taken to handle it with complete precision (assuming of course precise throw-site information).
 \item Captured variable assigned to in inner closure scope.
 \item Function calls with variable number of arguments, or ``splatting''.
+\item (probably something else ?)
 \end{itemize}
 
 A function in Julia is in fact a collection of methods, partially ordered by their signature types as a sub-lattice of the type lattice.
@@ -277,9 +264,10 @@ The absence of ambiguities is enforced at the declaration, ensuring that for any
 
 This feature is the central one of the language and has interesting repercussion on analysis strategies. [ref jeff phd for more discussion ?]. Since virtually every function call is indirect, not knowing the argument types can lead to a combinatorial blowup of code to explore in an interprocedural analysis, leading to widening and more precision loss. It is therefore often worth to trade performance for precision as long as it can keep types fully known.
 
-The choice of EBB for the control flow graph is favorable to forward analysis, as inbound edges are the ones requiring treatment. Even though it is equivalent to a BB graph representation that moreover has a single exit point, in practice it allows for a shallower dominator tree.
+The choice of EBB for the control flow graph is favorable to forward analysis, as inbound edges are the ones requiring treatment. Even though it is equivalent to a BB graph representation, in practice it allows for a shallower dominator tree.
+Another advantage of EBBs is that the dynamic addition of outbound control flow edges does not require node splitting. It is the case of exception throwing : it would degrade the sparsity of the CFG to conservatively assume that any statement can throw. Our interpreter generates new edges when a transfer function detects a possible raise.
 
-\subsection*{Analysis sparsity}
+\section*{Analysis sparsity}
 
 The Green fairy is oriented towards building flow-sensitive analysis, that is, it provides information dependent on the program point.
 A simple way to implement a flow-sensitive computation is to store a dense mapping of program points to interpreter state. It has the benefit of being oblivious to the structure of said state.
@@ -288,6 +276,8 @@ In the vast majority of cases, the states at two nearby program points is highly
 
 There is another related kind of sparsity, that is sometimes called \emph{temporal}, where the analyzer benefits from knowledge of state dependencies to avoid recomputing transfer operators that only use unchanged subset of the state. It allows the interpreter to make results from computation flow directly into use sites. In the current implementation we do not use temporal sparsity, mainly due to a combination of time constraints and soundness concerns, although care was taken to ensure the feasability of this optimization in the future.
 
+\subsection*{Separable analysis}
+
 \paragraph{Static Single Assignment} The classical example of sparsity is the \emph{SSA} transform. If a program is in SSA form, separable analysis can easily be both spatially and temporally sparse. The transform can be naturally derived by starting with the goal of making a variable analysis sparse.
 
 Let's assume that the abstract state of interest is, for each program point, a simple mapping $\text{Var}\to V$ from variable names to some unspecified abstract value domain. Since at most a single variable mapping can change from a program point to one of it's successor, it is tempting to only store -- at most -- a single $(\text{name}\mapsto\text{value})$ tuple for each statement of the program. One can then reconstruct the value of any variable $v$ at any point, simply by walking the CFG backward looking for the latest $(v\mapsto *)$ update. This scheme unfortunately is not sufficient, since in the presence of a statement with multiple control predecessors -- in our case, the head of an EBB -- we have to explore all of them to join the different possible values of $v$ together.
@@ -295,7 +285,6 @@ Let's assume that the abstract state of interest is, for each program point, a s
 SSA solves this problem by summarizing the information about the ``past'' of variables at control flow join points, in the form of virtual $\phi$ instructions that explicits the dependency of the variable's value in the different incoming edges. A simple example is :
 
 \begin{minipage}[t]{0.20\linewidth}
-%\begin{algorithm}[H]
 \begin{lstlisting}[language=julia]
 a = 0
 if ?
@@ -305,7 +294,6 @@ else
 end
 out(a)
 \end{lstlisting}
-%\end{algorithm}
 \end{minipage}
 \begin{minipage}[t]{0.30\linewidth}
 \null
@@ -335,13 +323,39 @@ out(a)
 
 A complete treatment of SSA and many related techniques are available in the excellent [ssabook]. We will still sketch here a few important ideas about SSA, and how they apply more generally.
 
-\paragraph{Dominator tree} A fundamental matter in the SSA transform is the question of where in the program $\phi$ nodes insertions are needed.
-This leads us to introduce the notion of domination : we say that a program point $a$ \emph{dominates} another point $b$ if any path in the CFG starting at the root node that reaches $b$ has to go through $a$ first. The domination relation is a partial order over program points and is moreover a tree (every initial segment is well ordered). It is usually called the dominator tree. In our case, since every path to a program point has to go through the head of its containing EBB -- and all the points between the head and itself -- we will say that a program point dominates an EBB if it dominates its head.
+\paragraph{Dominator tree} A central matter in the SSA transform is the question of where in the program $\phi$ nodes insertions are needed.
+This leads us to introduce the notion of domination : we say that a program point $a$ \emph{dominates} another point $b$ if any path in the CFG starting at the root node that reaches $b$ has to go through $a$ first. The domination relation is a partial order over program points and is moreover a tree (every initial segment is well ordered). It is usually called the dominator tree. In our case, since every path to a program point has to go through the head of its containing EBB -- and all the points between the head and itself -- we will say that a program point dominates an EBB if it dominates its head. Given an EBB, the program point being its parent in the dominator tree is called the \emph{immediate dominator}.
 
-[talk about how the renaming is not the important part, our impl. does dynamic ssa and thus renaming is inefficient comp. to lookup the dom tree]
+The fundamental property of SSA form is then stated as follows : \emph{every use of a variable is dominated by a definition of said variable}. This is, of course, considering $\phi$ nodes as definitions. We can deduce a superset of locations where we have to insert $\phi s$ for the property to hold. We will call the dominance frontier of a program point $a$, noted $DF(a)$, the set of EBB heads that, while not being dominated by $a$, have predecessors that are. $DF(a)$ is the set of nodes that one has to visit in order to, starting from $a$, leave its domination. We note $IDF(a) = \text{lfp}_aDF$. If a variable $v$ has two definitions at $a$ and $b$ respectively, then the set of program points where we have to insert a $\phi$ to disambiguate between $a$ and $b$ are contained in $IDF(a)\cap IDF(b)$. This set is an upper bound, because some of those $\phi$ may end up without any use. Computing the minimal $\phi$ placement is harder and requires a form of liveness analysis. We build the dominator tree and frontiers using the algorithm described in [?].
+
+In its usual formulation, SSA also implies a renaming of every variale to enforce that, as its name indicates, each one has a single definition site. As a consequence, we can store a global $(\text{name}\to\text{value})$ mapping as a flow-insensitive analysis would, but still get flow-sensitive results.
+
+We take a slightly different approach because we compute the SSA form \emph{on the fly} : we assume that use sites of variables cannot be statically determined in advance without computing transfer functions. It also implies that new use and definition sites can be discovered at an already processed program point in later iterations.
+The main reason for this choice is to allow for other quantities than variable values to profit from the sparse infrastructure.
+[examples]
+
+It is hence inefficient in our case to maintain the renaming property. Instead, when encountering an use, the interpreter walks the dominator tree upward to find the nearest definition. The SSA property guarantees that this lookup can be done following the tree spine, giving it an $O(\text{dominator tree depth})$ worst case complexity. In practice, the dominator tree is very shallow and wide : in the Julia standard library (around 4MB of sources) the deepest dominator tree is of depth [?]. As for the implementation, we do not materialize $\phi$ instructions : they are kept out of band and can be dynamically generated efficiently when required by the discovery of new definitions.
+
+We have not yet witnessed this process to be a bottleneck. Would it become the case, there are several ideas that could be implemented to lower its cost, such as use-forwarding.
+
+\subsection*{Relational analysis}
 
 [SSA is easy because it handles separable analysis, where the ``diff'' between two states is simply a environment itself. Talk about how the underlying good idea is the summarization between an EBB and it's idom]
 
-\subsection*{Shape analysis}
+\section*{Shape analysis}
+
+\section*{I can see the future}
+
+
+We briefly hinted at domain-specific optimizations in the introduction.
+Our long term plan is to provide hooks in the compiler and the analyzer to allow for user defined analysis and optimization.
+Moreover, those should be able to easily build upon the existing infrastructure.
+Although the abstract interpreter model is a good fit in that regard, we have not yet found a fully satisfactory equivalent for the optimization side.
+
+As a good example of the envisioned usefuleness of this kind of modularity, consider the developement of a high-level interface to a BLAS library.
+This was not choosen at random since the linear algebra routines are in fact a sizable chunk of the Julia standard library, and BLAS is used as their backend in the common case floating point numeric types.
+
+It is much easier to use under a simple model where the output of the computation is freshly allocated memory containing the result. This avoids aliasing bugs, however it is inefficient because it does not take advantage of the specialized BLAS functions that can output the result in place. Reasonning that the two are equivalent if one of the argument (and all its aliases) are dead after the BLAS call is almost impossible to the compiler because it requires understanding of the routine, of which the core is often hand written assembly. However, the rules of BLAS aliasing are very regular at a high level and someone writing a wrapper for the library could easily, given the right interface, integrate those rules directly as a compiler extension.
+
 
 \end{document}
