@@ -1635,7 +1635,7 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
         return convert(V,reduce(join, args[2:end]))
     end
     if f <= Const(Base.typeof)
-        return convert(V,Kind(argtypes[1].ty))
+        return meet(convert(V,Kind(argtypes[1].ty)), Ty(DataType))
     end
     if f <= Const(Base.tuple)
         return convert(V,Ty(Tuple{map(a->a.ty,argtypes)...}))
