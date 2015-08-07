@@ -37,6 +37,7 @@
 \newcommand{\UD}{\overline{\Diamond}}
 \renewcommand{\S}{\mathcal{S}}
 \newcommand{\oS}{\overline{\mathcal{S}}}
+\newcommand{\dS}{\delta\mathcal{S}}
 \newcommand{\ra}{\rightarrow}
 \newcommand{\lfp}{\text{lfp}}
 \title{\vspace{-6ex}A modular abstract interpreter for Julia \\ MPRI internship report}
@@ -50,7 +51,7 @@
 \vspace{1.5ex}
 \subsection*{General context}
 
-Julia is a dynamically typed, JIT compiled, programming language implementation with an emphasis on generic programming through a powerful -- and ubiquitous -- symmetric, dynamic multiple dispatch mechanism. It achieves run-time performance untypical of other similar dynamic languages by relying heavily on static analysis and aggressive code specialization. It is meant to provide a tool for scientific computations that is both familiar and fast enough for this demanding usage. The julia compiler provides a range of meta programming and code generation techniques to the advanced user.
+Julia\cite{julia-paper}\cite{julia-web} is a dynamically typed, JIT compiled, programming language implementation with an emphasis on generic programming through a powerful -- and ubiquitous -- symmetric, dynamic multiple dispatch mechanism. It achieves run-time performance untypical of other similar dynamic languages by relying heavily on static analysis and aggressive code specialization. It is meant to provide a tool for scientific computations that is both familiar and fast enough for this demanding usage. The julia compiler provides a range of meta programming and code generation techniques to the advanced user.
 
 Efforts into optimizing dynamic languages are not new, as the common lisp tradition shows, and more recently the sizable effort into making various javascript engines high performance. Julia has the interesting advantage of having been designed from the ground up to be a good analysis target and, while being dynamic, avoids pathological behavior patterns that are very hard to infer statically.
 
@@ -69,11 +70,11 @@ As the main project of this internship, an extensible static analysis library fo
 
 It uses a spatially-sparse representation of the interpreter state enabling scalability across large programs. The main value domain is an extensible generic implementation of the reduced product construction, making it reasonably easy to extend it with new models.
 
-It also features a work-in-progress interprocedural flow-sensitive shape analysis, based on Static Shape Graphs [?]. The shape analysis uses a sparse representation as well, and an optimistic but conservative model of aliasing information for the unknown parts of the heap that allows it to treat gracefully the usual problem of the cost of context sensitivity.
+It also features a work-in-progress interprocedural flow-sensitive shape analysis, based on Static Shape Graphs \cite{ssc}. The shape analysis uses a sparse representation as well, and an optimistic but conservative model of aliasing information for the unknown parts of the heap that allows it to treat gracefully the usual problem of the cost of context sensitivity.
 
 \subsection*{Arguments supporting their validity}
 
-The implementation is available as an ongoing work at [?]. It is already capable of applying both value-level (currently constant propagation \& type inference) and shape analysis to a significant body of julia code.
+The implementation is available as an ongoing work at \cite{gf-web}. It is already capable of applying both value-level (currently constant propagation \& type inference) and shape analysis to a significant body of julia code.
 It succeeds in demonstrating our ideas on a \emph{non-toy} real world language, including its more exotic and idiosyncratic features.
 We are hopeful about integrating our work in the main compiler in the coming year.
 
@@ -98,7 +99,7 @@ Those points are developped further along in the report.
 
 At its core, abstract interpretation is a mathematical framework intended to formally describe a large class of static program analysis.
 It provides a language and generic tools to prove their soundness.
-The following is intended as a light and informal explanation, the reader familiar with this concept can safely skip it.
+The following is intended as a light and informal explanation, the reader familiar with this concept can safely skip it. For a complete exposition, we refer to the seminal paper introducing abstract interpretation\cite{absint-cousot}.
 
 Static analysis is the idea of deriving provably true information about the \emph{run-time} behavior of a program in finite -- and reasonable -- time.
 The usage of static analysis is extremely broad and ranges from the most basic compiler optimization to a rich zoo of safety checkers.
@@ -111,8 +112,8 @@ It is however useful to consider \emph{non-deterministic} systems, even in the s
 
 To allow the representation of those unknown states, we will make elements of $\S$ to be sets of execution traces. They are naturally ordered by set inclusion, forming a complete lattice.
 In fact, we can think of this order as a measure of the information given by the knowledge that a specific trace lives in one of those sets.
-We can sketch static analysis in the following way : given some information, $\sigma\in\S$, about the state of a program, what can reasonably be deduced about
-all the reachable states from $\sigma$ ?
+We can sketch static analysis in the following way : given some information, $\sigma\in\S$, about the state of a program, what can be deduced about
+all the reachable states from $\sigma$ in a reasonable amount of time ?
 
 The most precise answer to this question is the smallest element of $\S$ that both contains $\sigma$ and is stable by $T$. Let's call it $\lfp_\sigma(T)$. This element is exactly the set of all possible traces of executions starting inside $\sigma$. The name lfp stands for least fixed point and in our case we can express it as 
 \[ \text{lfp}_\sigma(T) = \sigma \cup T(\sigma) \cup T^2(\sigma) \cup \dots \]
@@ -186,7 +187,7 @@ but computing this result would require up to a thousand iterations. If instead 
 Although this trivial example only deals with abstracting values, a fundamental trait of abstract interpretation is that the whole state of the program -- or rather it's interpreter -- can be abstracted in the same framework. This allows us to treat uniformly, at least on the proof level, the loss of precision due to value approximation and various other simplifications, such as context/path/flow-insensitivity or the choices of modeling for the program heap. 
 
 
-\paragraph{Product domains} Having a generic language also opens the opportunity for generic constructs, such as the reduced product. Given two abstract domains $D_1$ and $D_2$ we want to build a combination of those that carries at least as much information. The first natural choice could be the cartesian product, however there is no advantage in computing on $D_1\times D_2$ compared to running two separate analysis. We can instead, given two reduction maps $r_1:D_1\times D_2\to D_1$ and $r_2:D_2\times D_1\to D_2$, form the so called reduced product $D_1 \otimes D_2$ under some soundness conditions. [note: same as fibered product in the category associated to the order] Elements $s_1\otimes s_2$ of $D_1 \otimes D_2$ verify the property that $r_1(s_1,s_2) = s_1$ and $r_2(s_2,s_1) = s_2$. Intuitively, $r_1$ and $r_2$ provide cross domain intersection -- or meet. That is, they must verify
+\paragraph{Product domains} Having a generic language also opens the opportunity for generic constructs, such as the reduced product. Given two abstract domains $D_1$ and $D_2$ we want to build a combination of those that carries at least as much information. The first natural choice could be the cartesian product, however there is no advantage in computing in $D_1\times D_2$ compared to running two separate analysis. We can instead, given two reduction maps $r_1:D_1\times D_2\to D_1$ and $r_2:D_2\times D_1\to D_2$, form the so called reduced product $D_1 \otimes D_2$ under some soundness conditions. [note: same as fibered product in the category associated to the order] Elements $s_1\otimes s_2$ of $D_1 \otimes D_2$ verify the property that $r_1(s_1,s_2) = s_1$ and $r_2(s_2,s_1) = s_2$. Intuitively, $r_1$ and $r_2$ provide cross domain intersection -- or meet. That is, they must verify
 \begin{align*}
 r_1(s_1,s_2) \leq s_1~\text{and}~ \gamma_1(r_1(s_1,s_2)) \leq \gamma_2(s_2) \\
 r_2(s_2,s_1) \leq s_2~\text{and}~ \gamma_2(r_2(s_2,s_1)) \leq \gamma_1(s_1)
@@ -198,9 +199,9 @@ As with all elegant formalism, abstract interpretation provides a good way to st
 
 \section*{Dadada}
 
-The Green fairy provides a reasonably generic framework that computes the fixed point of user provided abstractions over a julia program. To give a quick example of its usage.
+The Green fairy provides a generic framework that computes the fixed point of user provided abstractions over a julia program. We will start by giving a short and simple example of its usage.
 \subsection*{Interval example}
-We will start with a simple definition of the (closed) interval domain before going into implementation details.
+Follows an implementation of the classical example of abstract domain : the (closed) numeric interval.
 \begin{singlespace}
 \begin{lstlisting}[language=julia]
 immutable Interval{T} <: Lattice
@@ -225,7 +226,7 @@ end
 It should be noted that this domain is parametric over any ordered numeric types having an upper and lower bound. Defining the \verb~isbot~ function is necessary since there are multiple representation of $\bot$ however the generic \verb~istop~ fallback is correct in that case.
 
 The \verb~meet_ext~ function is the product domain reduction function. In that case we express that the knowledge that a value is constant can reduce an interval to a single point or $\bot$ depending on the particular value. We are free to add other definitions to this function to increase precision using information from other domains.
-Defining this function gives the interpreter the ability to evaluate literals -- since they are obvious constants -- as well as propagated constants in the interval domain. In fact, the only difference between \verb~Const~ and first-class user defined domains is its built-in use by the interpreter when a literal value is encountered. 
+Defining this function gives the interpreter the ability to evaluate literals, as well as propagated constants, in the interval domain. In fact, the only difference between \verb~Const~ and first-class user defined domains is its built-in use by the interpreter when a literal value is encountered. 
 
 Providing transfer functions is also straightforward, as demonstrated by this simple example for addition of intervals :
 \begin{singlespace}
@@ -242,25 +243,37 @@ end
 \end{singlespace}
 We can see that the arguments can be provided in different domain than that of intervals, requiring a \verb~convert~ call. This gives access to the full product to a transfer function, making it possible to use information from other domains in the computation. A transfer function can also return values living in the product if it is able to deduce more precise facts than what is expressible in its own domain.
 
-Several opt-in features for value domains and their transfer functions are not described here for the sake of brevity. This includes widening, participation in the dispatch selection, state-altering actions such as exception raising and the ability to control the propagation of values over function call boundaries.
+Due do space constraints, we relegate to the appendix another example that demonstrates the construction of a \emph{finite disjunction} domain that is parametric over any other domain and can thus serve as a composable building block. It can be used to enhance precision while keeping the implementation simple and decoupled.
+
+Several important opt-in features for value domains and their transfer functions were not described here for the sake of brevity. This includes widening, participation in the dispatch machinery, the ability to control the propagation of values over function call boundaries, as well as state-altering actions such as exception raising or heap operations.
 
 \section*{Julia's semantic}
 
-For the sake of this report, we'll consider a simplified version of the actual semantic of the so-called ``lowered julia'' representation that the Green fairy is targeting. A function is a graph of extended basic blocks (EBB). Their defining property is to have a single control flow entry point as their head. Each one contains a linear succession of branches and variable assignments to literals and function calls. Expressions are unnested prior to the analysis.
+For the sake of this report, we'll consider a simplified version of the actual semantic of the so-called ``lowered julia'' representation that the Green fairy is targeting.
+A function is a graph of extended basic blocks (EBB). Their defining property is to have a single control flow entry point as their head. Each one contains a linear succession of branches and variable assignments to literals and function calls.
+Expressions are unnested prior to the analysis.
 
-The following features complicate the implementation but will be ignored in this presentation :
+\paragraph{Memory model} Julia is imperative, impure and call-by-value.
+For the purpose of this write up, we can consider julia objects as memory cells living in an infinite heap, each having a finite set of numbered fields, possibly pointing to other objects.
+A cell's layout is determined by its type but we can readily abstract away those considerations since interior pointers are not allowed by the language.
+We won't take arrays into account here. In our implementation they are modeled as an object with a single field supporting only weak updates.
+
+\paragraph{Generic functions} A function in Julia is in fact a collection of methods, partially ordered by their signature types as a sub-lattice of the type lattice.
+The dispatch mechanism is dynamic -- albeit statically inferred in many cases -- and is symmetric in all the arguments : the most specific method will be called at run-time depending on the argument types.
+The absence of ambiguities is enforced at the method declaration.
+It is ensured that for any argument type there exists a well defined least upper bound in the sub-lattice.
+More details about Julia's generic functions can be found in \cite{julia-paper} and \cite{jeff-phd}.
+
+This feature is the central one of the language and has interesting repercussions on analysis strategies. Since virtually every function call is indirect, not knowing the argument types can lead to a combinatorial blowup of code to explore in an interprocedural analysis, leading to widening and more precision loss. It is therefore often worth to trade performance for precision as long as it can keep types fully known. This is discussed in \cite{jeff-phd} along with, among other things, a thorough discussion of the synergy between multiple dispatch and interprocedural type inference.
+
+The following features of Julia add complexity to the implementation but will be ignored in this presentation.
 \begin{itemize}
 \item Exception handling. Even though special care was taken to handle it with complete precision (assuming of course precise throw-site information).
-\item Captured variable assigned to in inner closure scope.
+\item Captured variable mutated in inner closure scope.
 \item Function calls with variable number of arguments, or ``splatting''.
 \item (probably some other things ?)
 \end{itemize}
 
-A function in Julia is in fact a collection of methods, partially ordered by their signature types as a sub-lattice of the type lattice.
-The dispatch is dynamic -- but can be statically inferred in many cases -- and is symmetric in all the arguments : the most specific method will be called at run-time depending on the argument types.
-The absence of ambiguities is enforced at the declaration, ensuring that for any argument type there exists a well defined least upper bound in the sub-lattice.
-
-This feature is the central one of the language and has interesting repercussion on analysis strategies. [ref jeff phd for more discussion ?]. Since virtually every function call is indirect, not knowing the argument types can lead to a combinatorial blowup of code to explore in an interprocedural analysis, leading to widening and more precision loss. It is therefore often worth to trade performance for precision as long as it can keep types fully known.
 
 \section*{Analysis sparsity}
 
@@ -269,15 +282,16 @@ A simple way to implement a flow-sensitive computation is to store a dense mappi
 However, as the state or the analyzed program gets larger, there is a growing cost associated to the copying of those state atoms.
 In the vast majority of cases, the states at two nearby program points is highly redundant and taking advantage of this redundancy can lead to consequent improvements in analysis performance. Exploiting this so-called \emph{spatial} sparsity of the state space is an important design point of our implementation.
 
-We develop a sparse representation of state that accomodates any non-relational user-defined domain for forward analysis in a transparent manner.
+We use a sparse representation of state that accomodates any non-relational user-defined domain for forward analysis in a transparent manner.
 This representation \emph{does not} require use/def sites to be identified ahead of time and is hence suitable for other program quantities than variables.
-Furthermore, we present an extension of this idea to a relational domain, namely, the Static Shape Graph heap model as developed in [?].
+Although they do not detail their implementation, a very similar structure is described in an abstract setting in \cite{sparse-nr}.
+Furthermore, we present an extension of this idea to a relational domain, namely, the Static Shape Graph heap model as introduced in \cite{ssc}.
 
-There is another related kind of sparsity, that is sometimes called \emph{temporal}, where the analyzer benefits from knowledge of state dependencies to avoid recomputing transfer operators that only use unchanged subset of the state. It allows the interpreter to make results from computation flow directly into use sites. In the current implementation we do not use temporal sparsity, mainly due to a combination of time constraints and soundness concerns, although care was taken to ensure the feasability of this optimization in the future.
+There is another related kind of sparsity, that is sometimes called \emph{temporal}, where the analyzer benefits from knowledge of state dependencies to avoid recomputing transfer operators that only use unchanged subset of the state. It allows the interpreter to make results from computations flow directly into use sites. In the current implementation we do not use temporal sparsity, mainly due to a combination of time constraints and soundness concerns, although care was taken to ensure the feasability of this optimization in the future.
 
 \subsection*{Non-relational}
 
-\paragraph{Static Single Assignment} The classical example of sparsity is the \emph{SSA} transform. If a program is in SSA form, variable analysis can easily be both spatially and temporally sparse. The transform can be naturally derived by starting with the goal of making a variable analysis sparse.
+\paragraph{Static Single Assignment} The classical example of sparsity is the \emph{SSA} transform. If a program is in SSA form, any forward variable analysis can easily be both spatially and temporally sparse. The transform can be naturally derived by starting with the goal of making a variable analysis sparse.
 
 Let's assume that the abstract state of interest is, for each program point, a simple mapping $\text{Var}\to V$ from variable names to some unspecified abstract value domain. Since at most a single variable mapping can change from a program point to one of it's successor, it is tempting to only store -- at most -- a single $(\text{name}\mapsto\text{value})$ tuple for each statement of the program. One can then reconstruct the value of any variable $v$ at any point, simply by walking the CFG backward looking for the latest $(v\mapsto *)$ update. This scheme unfortunately is not sufficient, since in the presence of a statement with multiple control predecessors -- in our case, the head of an EBB -- we have to explore all of them to join the different possible values of $v$ together.
 
@@ -320,38 +334,104 @@ out(a)
 \end{tikzpicture}
 \end{minipage}
 
-A complete treatment of SSA and many related techniques are available in the excellent [ssabook]. We will still sketch here a few important ideas about SSA, and how they apply more generally.
+\hfill
+
+A complete treatment of SSA and a profusion of related optimization techniques are available in the excellent \emph{SSA Book}\cite{ssa-book}. We will still sketch here a few important ideas about SSA, and how they apply more generally.
 
 \paragraph{Dominator tree} A central matter in the SSA transform is the question of where in the program $\phi$ nodes insertions are needed.
 This leads us to introduce the notion of domination : we say that a program point $a$ \emph{dominates} another point $b$ if any path in the CFG starting at the root node that reaches $b$ has to go through $a$ first. The domination relation is a partial order over program points and is moreover a tree (every initial segment is well ordered). It is usually called the dominator tree. In our case, since every path to a program point has to go through the head of its containing EBB -- and all the points between the head and itself -- we will say that a program point dominates an EBB if it dominates its head. Given an EBB, the program point being its parent in the dominator tree is called the \emph{immediate dominator}.
 
-The fundamental property of SSA form is then stated as follows : \emph{every use of a variable is dominated by a definition of said variable}. This is, of course, considering $\phi$ nodes as definitions. We can deduce a superset of locations where we have to insert $\phi s$ for the property to hold. We will call the dominance frontier of a program point $a$, noted $DF(a)$, the set of EBB heads that, while not being dominated by $a$, have predecessors that are. $DF(a)$ is the set of nodes that one has to visit in order to, starting from $a$, leave its domination. We note $IDF(a) = \text{lfp}_aDF$. If a variable $v$ has two definitions at $a$ and $b$ respectively, then the set of program points where we have to insert a $\phi$ to disambiguate between $a$ and $b$ are contained in $IDF(a)\cap IDF(b)$. This set is an upper bound, because some of those $\phi$ may end up without any use. Computing the minimal $\phi$ placement is harder and requires a form of liveness analysis. We build the dominator tree and frontiers using the algorithm described in [?].
+The fundamental property of SSA form is then stated as follows : \emph{every use of a variable is dominated by a definition of said variable}. This is, of course, considering $\phi$ nodes as definitions. We can deduce a superset of locations where we have to insert $\phi s$ for the property to hold.
+We will call the dominance frontier of a program point $a$, noted $DF(a)$, the set of EBB heads that, while not being dominated by $a$, have predecessors that are. $DF(a)$ is the set of nodes that one has to visit in order to, starting from $a$, leave its domination.
+Following the usual convention, we note $IDF(a) = \text{lfp}_aDF$ the iterated dominance frontier of $a$.
+If a variable $v$ has two definitions at $a$ and $b$ respectively, we can disambiguate between them by inserting $\phi$ nodes in a subset of $IDF(a)\cap IDF(b)$.
+This set is an upper bound, because some of those $\phi$ may end up without any use. Computing the minimal $\phi$ placement is harder and requires a form of liveness analysis.
+The advantage of the iterated dominance frontier is that $IDF(a)$ only depends on $a$ and can be cached independently of the variable considered.
 
-In its usual formulation, SSA also implies a renaming of every variale to enforce that, as its name indicates, each one has a single definition site. As a consequence, we can store a global $(\text{name}\to\text{value})$ mapping as a flow-insensitive analysis would, but still get flow-sensitive results.
+In its usual formulation, SSA also implies a renaming of every variable to enforce that, as its name indicates, each one has a single definition site. As a consequence, we can store a global $(\text{name}\to\text{value})$ mapping as a flow-insensitive analysis would, but still get flow-sensitive results.
 
-We take a slightly different approach because we compute the SSA form \emph{on the fly} : we assume that use sites of variables cannot be statically determined in advance without computing transfer functions. It also implies that new use and definition sites can be discovered at an already processed program point in later iterations.
+
+\paragraph{Our thing?} We take a slightly different approach because we compute the same information as the SSA form but \emph{on the fly} : we assume that use sites of variables cannot be statically determined in advance without computing transfer functions.
+It also implies that new use and definition sites can be discovered at an already processed program point in later iterations.
 The main reason for this choice is to allow for other quantities than variable values to profit from the sparse infrastructure.
 [examples]
 
-It is hence inefficient in our case to maintain the renaming property. Instead, when encountering an use, the interpreter walks the dominator tree upward to find the nearest definition. The SSA property guarantees that this lookup can be done following the tree spine, giving it an $O(\text{dominator tree depth})$ worst case complexity. In practice, the dominator tree is very shallow and wide : in the Julia standard library (around 4MB of sources) the deepest dominator tree is of depth [?]. As for the implementation, we do not materialize $\phi$ instructions : they are kept out of band and can be dynamically generated efficiently when required by the discovery of new definitions.
+Essentially, what we are providing is a generic sparse map implementation from an arbitrary set of names to any value domain.
+It can be used to represent any non-relational internal interpreter state of the user's choice.
 
-We have not yet witnessed this process to be a bottleneck. Would it become the case, there are several ideas that could be implemented to lower its cost, such as use-forwarding.
+It is hence inefficient in our case to maintain the renaming property. Instead, when encountering an use, the interpreter walks the dominator tree upward to find the nearest definition.
+The SSA property guarantees that this lookup can be done following the tree spine, giving it an $O(\text{dominator tree depth})$ worst case complexity. In practice, the dominator tree is very shallow and wide : in the Julia standard library (around 4MB of sources) the deepest dominator tree is of depth [?].
+
+As for the implementation, we do not materialize $\phi$ instructions : they are kept out of band as a single compound summary information for each EBB head.
+They can be efficiently dynamically updated when required by the discovery of new definitions.
+We compute the dominator tree and frontiers using the algorithm described in \cite{domtree}.
+
+We have not yet witnessed this process to be a bottleneck. Would it become the case, there are several ideas that could be implemented to lower its cost. The most obvious one being use-forwarding.
+As an aside, the choice of EBBs for the program representation offsets the time spent doing this lookup in practice by making common dominator trees shallower.
+It is not a worst-case improvement but a welcomed average constant factor gain.
 
 % find somewhere to put this
-%The choice of EBB for the control flow graph is favorable to forward analysis, as inbound edges are the ones requiring treatment. Even though it is equivalent to a BB graph representation, in practice it allows for a shallower dominator tree.
 %Another advantage of EBBs is that the dynamic addition of outbound control flow edges does not require node splitting. It is the case of exception throwing : it would degrade the sparsity of the CFG to conservatively assume that any statement can throw. Our interpreter generates new edges when a transfer function detects a possible raise.
 
-\subsection*{Relational analysis}
+\subsection*{Relational}
 
-[SSA is easy because it handles separable analysis, where the ``diff'' between two states is simply a environment itself. Talk about how the underlying good idea is the summarization between an EBB and it's idom]
+As a more general point of view, one can think of $\phi$ nodes as a compact representation of the difference between the interpreter state at an EBB entry and the same state at the dominating exit of its immediate dominator.
+It is not readily apparent in the case of a non-relational domain, since this difference is usually represented as an element of the domain itself, i.e., a small name-value mapping that only refers to changed names.
+
+[good example + explanation of a generic translation]
+[trash a bit \cite{sparse-nr} for using saying relational in their title and only handling packed domains]
 
 \section*{Shape analysis}
 
+[todo some platitudes about shape analysis]
+
+For a moment, we will ignore object fields and summary objects to concentrate on variable aliasing.
+One of the fundamental insight of \cite{ssc} is in the scheme used to describe abstract heap locations.
+The abstract address of an object is given by the exact set of stack variables that refers to it.
+It means that we can represent the abstract heap as a collection of set of variable names.
+The main advantage of this approach compared to the other usual choices, such as allocation site segregation, is that transfer functions operating on objects referenced by variables can \emph{always} perform strong updates.
+It is due to the fact that each one of those abstract addresses can refer to at most a single object in any given concrete heap.
+Another very important point about this choice is that it provides a canonical way to compare two abstract heaps : there is no ambiguity on the mapping between the nodes, avoiding any kind of graph isomorphism problems.
+
+We refer to \cite{ssc} for the formal deduction rules and computation recipes in this abstract domain.
+We will focus here on exposing a way to implement a similar state domain with a sparse representation.
+The main inspiration comes from \cite{ssa-alias} : they develop a sparse alias analysis for local variables that we use as a basis for our shape domain. The authors make the following observation.
+
+Assuming that the analyzed code is in SSA form, we can order the set of program variable under the domination relation of their definition.
+That being done, it is clear that when transfering the state over a non-dominating edge, we can trim all heap objects of variables whose definition stopped dominating the current control point. In fact, we can always remove any dead variables from our abstract heap, and non-dominating definitions are always dead thanks to the fundamental property of SSA.
+
+To be slightly more precise, here is a sketch of the transfer function for variable assignment and $\phi$ nodes.
+\[
+\begin{aligned}
+&T[x=y](o) = \begin{cases}
+o \cup \left\{ x \right\} & \text{if } y \in o \\
+o & \text{otherwise}
+\end{cases}
+\qquad
+T[x=y](H) = \left\{~T[x=y](o)~|~o \in H~\right\} \\
+& T[\tilde{x}=\tilde{y}] = T[x_1=y_1]\circ\dots\circ T[x_n=y_n] \\
+&T[\phi(\tilde{x}=\tilde{y},\tilde{z})](H_l,H_r) = \big( T[\tilde{x}=\tilde{y}](H_l)\cup T[\tilde{x}=\tilde{z}](H_r) \big)\cap 2^{\text{dom}(\tilde{x})}
+\end{aligned}
+\]
+
+where $\text{dom}(\tilde{x})$ is the set of variable having their definition in a dominating position over the $\phi$ node, including itself. It is important to notice both that we don't need to remove $x$ from any object when assigning to $x$ since the definition was non-dominating before applying $T$.
+
+From this formulation, we can deduce a sparse format for this simplified ``variable-only'' static shape graph : there is a consequent amount of sharing between subsequent states. In fact, we can see from the transfer functions that they only need to manipulate the ``most recently'' defined variables in each object.
+ In \cite{ssa-alias}, this sharing is exploited by representing heap objects as sorted singly-linked list with hash-consing. The elimination of redundancy is thus implicitely handled by the datastructure.
+
+It has the benefit of keeping the implementation close to the mathematical structure, but forces the algorithm to keep the linked list heads of \emph{all} live heap objects at all control points, defeating some of the sparsity.
+We take an alternate route of representing the tree explicitely. At the cost of additional lookups along its spine -- much like in the SSA case -- we can cut down the storage at each control point to the set of modified objects.
+
+
 \section*{I can see the future}
 
-[technical/impl things] [backward analysis?] [abstract debugger]
+[summary of contributions] [technical/impl things] [backward analysis?]
 
-We briefly hinted at domain-specific optimizations in the introduction.
+\paragraph{Generic sparsification} We hypothesize that a general transform from dense to sparse state structure underlies the particular one presented in this report and included in our implementation.
+Although we do not hope for a fully mechanized way to do such a conversion, it is likely that we could provide a set of generic reusable component to make the implementation as well as the soundness proof of those state domains easier.
+As more use cases appear we will try to develop a general framework, both theoritical and implementation-wise, for this process.
+
+\paragraph{User provided optimizations} We briefly hinted at domain-specific optimizations in the introduction.
 Our long term plan is to provide hooks in the compiler and the analyzer to allow for user defined analysis and optimization.
 Moreover, those should be able to easily build upon the existing infrastructure.
 Although the abstract interpreter model is a good fit in that regard, we have not yet found a fully satisfactory equivalent for the optimization side.
@@ -359,7 +439,34 @@ Although the abstract interpreter model is a good fit in that regard, we have no
 As a good example of the envisioned usefuleness of this kind of modularity, consider the developement of a high-level interface to a BLAS library.
 This was not choosen at random since the linear algebra routines are in fact a sizable chunk of the Julia standard library, and BLAS is used as their backend in the common case floating point numeric types.
 
-It is much easier to use under a simple model where the output of the computation is freshly allocated memory containing the result. This avoids aliasing bugs, however it is inefficient because it does not take advantage of the specialized BLAS functions that can output the result in place. Reasonning that the two are equivalent if one of the argument (and all its aliases) are dead after the BLAS call is almost impossible to the compiler because it requires understanding of the routine, of which the core is often hand written assembly. However, the rules of BLAS aliasing are very regular at a high level and someone writing a wrapper for the library could easily, given the right interface, integrate those rules directly as a compiler extension.
+It is easy to use under a simple model where the output of the computation is freshly allocated memory containing the result. This avoids aliasing bugs, however it is inefficient because it does not take advantage of the specialized BLAS functions that can output the result in place. Reasonning that the two are equivalent if one of the argument (and all its aliases) are dead after the BLAS call is almost impossible to the compiler because it requires understanding of the routine, of which the core is often hand written assembly.
+However, the rules of BLAS aliasing are very regular at a high level and someone writing a wrapper for the library could easily, given the right interface, integrate those rules directly as a compiler extension.
 
+As we work towards making the interpreter more accessible, the need for good tooling becomes unavoidable.
+
+\paragraph{Abstract debugging} We would like to provide a common infrastructure aimed at debugging abstract domains.
+In its simplest form, this system would open the possibility for a domain to provide small run-time guards checking that the state conforms to what was inferred.
+The analyzer would then, in ``verification'' mode, insert those guards in the code before running it, along with the necessary information to trace back the exact transfer function that computed an unsound result.
+This would obviously not replace a formal proof of soundness but would help weed out implementation errors by large scale testing on the consequent amonut of freely available julia source.
+
+\paragraph{Visualization} As a way to help implementation work, a graphical visualization of the interpreter was hastily put together.
+The usefuleness of this tool exceeded our -- admitedly low -- expectations. [maybe screenshot in annex]
+We believe that interactive feedback is a key aspect of allowing users with no particular background in program analysis to develop an understanding of the -- in fact quite natural -- underlying model.
+
+\newpage
+
+\begin{thebibliography}{9}
+
+\bibitem{julia-paper} Jeff Bezanson, Alan Edelman, Stefan Karpinski, Viral B. Shah -- \emph{Julia: A fresh approach to numerical computing} (2014) \verb~arXiv:1411.1607~
+\bibitem{julia-web} \verb~http://julialang.org~
+\bibitem{ssc} Sagiv, Mooly, Thomas Reps, Reinhard Wilhelm -- \emph{Solving shape-analysis problems in languages with destructive updating} (TOPLAS 1998)
+\bibitem{gf-web} \verb~https://github.com/carnaval/green-fairy~
+\bibitem{absint-cousot} Patrick Cousot, Radhia Cousot -- \emph{Abstract interpretation: a unified lattice model for static analysis of programs by construction or approximation of fixpoints} (SIGPLAN 1977)
+\bibitem{jeff-phd} Jeff Bezanson -- \emph{Abstraction in Technical Computing} (2015)
+\bibitem{ssa-book} ``Lots of authors'' -- \emph{Static Single Assignment Book} (2015)
+\bibitem{ssa-alias} N. A. Naeem, O. Lhotak -- \emph{Efficient alias set analysis using SSA form} (ISMM 2009)
+\bibitem{sparse-nr} Hakjoo Oh, Kihong Heo, Wonchan Lee, Woosuk Lee, Kwangkeun Yi -- \emph{Design and Implementation of Sparse Global Analyses for C-like Languages} (PLDI 2012)
+\bibitem{domtree} Cooper, Keith D., Timothy J. Harvey, Ken Kennedy -- \emph{A simple, fast dominance algorithm} (2001)
+\end{thebibliography}
 
 \end{document}
