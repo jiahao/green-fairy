@@ -70,7 +70,7 @@ As the main project of this internship, an extensible static analysis library fo
 
 It uses a spatially-sparse representation of the interpreter state enabling scalability across large programs. The main value domain is an extensible generic implementation of the reduced product construction, making it reasonably easy to extend it with new models.
 
-It also features a work-in-progress interprocedural flow-sensitive shape analysis, based on Static Shape Graphs \cite{ssc}. The shape analysis uses a sparse representation as well, and an optimistic but conservative model of aliasing information for the unknown parts of the heap that allows it to treat gracefully the usual problem of the cost of context sensitivity.
+It also features a work-in-progress interprocedural flow-sensitive shape analysis, based on Static Shape Graphs\cite{ssc}. The shape analysis uses a sparse representation as well, and an optimistic but conservative model of aliasing information for the unknown parts of the heap that allows it to treat gracefully the usual problem of the cost of context sensitivity. It is able to track bounded allocation lifetimes across loop iterations precisely, opening up the possibility of interesting static garbage collection optimizations.
 
 \subsection*{Arguments supporting their validity}
 
@@ -82,8 +82,7 @@ We are hopeful about integrating our work in the main compiler in the coming yea
 
 Besides tying up the various technical loose ends and improving the non-algorithmic bottlenecks of the implementation, we have several goals for the future of this project.
 
-As of today, using the information computed in the analysis to perform actual optimizations is not easy.
-A consequent amount of technical work has to be done to make the later stages of the compiler modular enough that the friction in taking advantage of new information from the analysis becomes much lower. In particular, we plan to implement a memory reuse optimization using the shape analysis results to provide precise no-escape information that will allow memory reuse and stack allocation, greatly reducing the load on the garbage collector and the dynamic allocator.
+A consequent amount of technical work has to be done to make the later stages of the compiler modular enough that the friction in taking advantage of new information from the analysis becomes much lower. In particular, we plan to implement optimizations using the shape analysis to provide precise no-escape information that will allow memory reuse and stack allocation, greatly reducing the load on the garbage collector and the dynamic allocator.
 
 In the longer term, the natural extension to this work is to devisef an intuitive interface that makes it possible for users to extend the abstract state of the interpreter with domain-specific informations. We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use.
 
@@ -244,6 +243,7 @@ end
 We can see that the arguments can be provided in different domain than that of intervals, requiring a \verb~convert~ call. This gives access to the full product to a transfer function, making it possible to use information from other domains in the computation. A transfer function can also return values living in the product if it is able to deduce more precise facts than what is expressible in its own domain.
 
 Due do space constraints, we relegate to the appendix another example that demonstrates the construction of a \emph{finite disjunction} domain that is parametric over any other domain and can thus serve as a composable building block. It can be used to enhance precision while keeping the implementation simple and decoupled.
+Those two examples illustrate the benefits of the pervasive use of ad-hoc polymorphism and multiple dispatch in Julia : it allows for the construction of reusable abstractions.
 
 Several important opt-in features for value domains and their transfer functions were not described here for the sake of brevity. This includes widening, participation in the dispatch machinery, the ability to control the propagation of values over function call boundaries, as well as state-altering actions such as exception raising or heap operations.
 
@@ -274,6 +274,10 @@ The following features of Julia add complexity to the implementation but will be
 \item (probably some other things ?)
 \end{itemize}
 
+In practice, a lot of variables in this representation have a single use.
+In particular the unnesting process generates a number of temporary variables of which the only use is in the same EBB as their definition.
+Although our implementation gives single-use variables special treatment for performance reasons, it does not change the overall algorithm and will also be ignored
+in the following presentation.
 
 \section*{Analysis sparsity}
 
@@ -379,13 +383,13 @@ As a more general point of view, one can think of $\phi$ nodes as a compact repr
 It is not readily apparent in the case of a non-relational domain, since this difference is usually represented as an element of the domain itself, i.e., a small name-value mapping that only refers to changed names.
 
 [good example + explanation of a generic translation]
-[trash a bit \cite{sparse-nr} for using saying relational in their title and only handling packed domains]
+[trash a bit \cite{sparse-nr} for saying relational in their title and only handling packed domains]
 
 \section*{Shape analysis}
 
 [todo some platitudes about shape analysis]
 
-For a moment, we will ignore object fields and summary objects to concentrate on variable aliasing.
+For a moment, we will ignore object fields and summary objects to concentrate on variable aliasing and its sparse structure. We will introduce those back later.
 One of the fundamental insight of \cite{ssc} is in the scheme used to describe abstract heap locations.
 The abstract address of an object is given by the exact set of stack variables that refers to it.
 It means that we can represent the abstract heap as a collection of set of variable names.
@@ -414,13 +418,21 @@ T[x=y](H) = \left\{~T[x=y](o)~|~o \in H~\right\} \\
 \end{aligned}
 \]
 
-where $\text{dom}(\tilde{x})$ is the set of variable having their definition in a dominating position over the $\phi$ node, including itself. It is important to notice both that we don't need to remove $x$ from any object when assigning to $x$ since the definition was non-dominating before applying $T$.
+where $\text{dom}(\tilde{x})$ is the set of variable having their definition in a dominating position over the $\phi$ node, including itself. It is important to notice that we don't need to remove $x$ from any object when assigning to $x$ since the definition was non-dominating before applying $T$.
 
 From this formulation, we can deduce a sparse format for this simplified ``variable-only'' static shape graph : there is a consequent amount of sharing between subsequent states. In fact, we can see from the transfer functions that they only need to manipulate the ``most recently'' defined variables in each object.
- In \cite{ssa-alias}, this sharing is exploited by representing heap objects as sorted singly-linked list with hash-consing. The elimination of redundancy is thus implicitely handled by the datastructure.
+In \cite{ssa-alias}, this sharing is exploited by representing heap objects as sorted singly-linked list with hash-consing. The elimination of redundancy is thus implicitely handled by the datastructure.
 
 It has the benefit of keeping the implementation close to the mathematical structure, but forces the algorithm to keep the linked list heads of \emph{all} live heap objects at all control points, defeating some of the sparsity.
-We take an alternate route of representing the tree explicitely. At the cost of additional lookups along its spine -- much like in the SSA case -- we can cut down the storage at each control point to the set of modified objects.
+We take an alternate route of representing the tree explicitely with pointers in both directions. At the cost of additional lookups along its spine -- much like in the SSA case -- we can cut down the storage at each control point to the set of modified objects.
+
+\paragraph{Alias tree} The encoding of variable aliasing takes the form of a forest of doubly-linked trees.
+Each node is labelled by a variable definition and several nodes can have the same label.
+This tree respects the dominance ordering of variable definitions.
+The information readily available from this structure is, given a variable $x$, the content of every heap object that $x$ refers to \emph{at the point it was defined}. Each path from a $x$-node to a root is such an object. The set of variable refering to that object is simply the set of labels encountered along the path.
+
+More work has to be done to compute the set of objects refering to $x$ at any point in the program using $x$ : it is the tradeoff we make to keep the storage per control point down.
+Assuming that the definition of $x$ dominates $a$, the set of tree nodes being the heads of objects that $x$ refers to can be characterized by :
 
 
 \section*{I can see the future}
@@ -456,17 +468,16 @@ We believe that interactive feedback is a key aspect of allowing users with no p
 \newpage
 
 \begin{thebibliography}{9}
-
-\bibitem{julia-paper} Jeff Bezanson, Alan Edelman, Stefan Karpinski, Viral B. Shah -- \emph{Julia: A fresh approach to numerical computing} (2014) \verb~arXiv:1411.1607~
+\bibitem[BEK14]{julia-paper} Jeff Bezanson, Alan Edelman, Stefan Karpinski, Viral B. Shah -- \emph{Julia: A fresh approach to numerical computing} (2014) \verb~arXiv:1411.1607~
+\bibitem[SMRW98]{ssc} Sagiv, Mooly, Thomas Reps, Reinhard Wilhelm -- \emph{Solving shape-analysis problems in languages with destructive updating} (TOPLAS 1998)
+\bibitem[CC77]{absint-cousot} Patrick Cousot, Radhia Cousot -- \emph{Abstract interpretation: a unified lattice model for static analysis of programs by construction or approximation of fixpoints} (SIGPLAN 1977)
+\bibitem[Bez15]{jeff-phd} Jeff Bezanson -- \emph{Abstraction in Technical Computing} (2015)
+\bibitem[LoA15]{ssa-book} ``Lots of authors'' -- \emph{Static Single Assignment Book} (2015)
+\bibitem[NL09]{ssa-alias} N. A. Naeem, O. Lhotak -- \emph{Efficient alias set analysis using SSA form} (ISMM 2009)
+\bibitem[OHLLY12]{sparse-nr} Hakjoo Oh, Kihong Heo, Wonchan Lee, Woosuk Lee, Kwangkeun Yi -- \emph{Design and Implementation of Sparse Global Analyses for C-like Languages} (PLDI 2012)
+\bibitem[CDHK01]{domtree} Cooper, Keith D., Timothy J. Harvey, Ken Kennedy -- \emph{A simple, fast dominance algorithm} (2001)
 \bibitem{julia-web} \verb~http://julialang.org~
-\bibitem{ssc} Sagiv, Mooly, Thomas Reps, Reinhard Wilhelm -- \emph{Solving shape-analysis problems in languages with destructive updating} (TOPLAS 1998)
 \bibitem{gf-web} \verb~https://github.com/carnaval/green-fairy~
-\bibitem{absint-cousot} Patrick Cousot, Radhia Cousot -- \emph{Abstract interpretation: a unified lattice model for static analysis of programs by construction or approximation of fixpoints} (SIGPLAN 1977)
-\bibitem{jeff-phd} Jeff Bezanson -- \emph{Abstraction in Technical Computing} (2015)
-\bibitem{ssa-book} ``Lots of authors'' -- \emph{Static Single Assignment Book} (2015)
-\bibitem{ssa-alias} N. A. Naeem, O. Lhotak -- \emph{Efficient alias set analysis using SSA form} (ISMM 2009)
-\bibitem{sparse-nr} Hakjoo Oh, Kihong Heo, Wonchan Lee, Woosuk Lee, Kwangkeun Yi -- \emph{Design and Implementation of Sparse Global Analyses for C-like Languages} (PLDI 2012)
-\bibitem{domtree} Cooper, Keith D., Timothy J. Harvey, Ken Kennedy -- \emph{A simple, fast dominance algorithm} (2001)
 \end{thebibliography}
 
 \end{document}
