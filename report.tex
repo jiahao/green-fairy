@@ -7,14 +7,19 @@
 \usepackage{verbatim}
 \usepackage{algpseudocode}
 \usepackage{algorithm}
+\usepackage{caption}
 \algblockdefx[IF]{If}{EndIf}[1]{\algorithmicif\ #1}{\algorithmicend}
 \algblockdefx[WHILE]{While}{EndWhile}[1]{\algorithmicwhile\ #1}{\algorithmicend}
+\algblockdefx[FOR]{For}{EndFor}[1]{\algorithmicfor\ #1}{\algorithmicend}
+\algblockdefx[FUNCTION]{Function}{EndFunction}[2]{\algorithmicfunction\ \textsc{#1}(#2)}{\algorithmicend}
 \usepackage{galois}
 \usepackage{tikz}
 \usepackage{varwidth}
 \usetikzlibrary{positioning}
 \usetikzlibrary{arrows.meta,bending,automata}
-\usepackage{pxfonts}
+%\usepackage{pxfonts}
+\usepackage[urw-garamond]{mathdesign}
+\usepackage{multicol}
 \usepackage[T1]{fontenc}
 \lstdefinelanguage{julia}{
   basicstyle=\small\ttfamily,
@@ -39,14 +44,21 @@
 \newcommand{\oS}{\overline{\mathcal{S}}}
 \newcommand{\dS}{\delta\mathcal{S}}
 \newcommand{\ra}{\rightarrow}
-\newcommand{\lfp}{\text{lfp}}
+\DeclareMathOperator{\lfp}{lfp}
+\DeclareMathOperator{\dom}{dom}
+\DeclareMathOperator{\idom}{idom}
+\DeclareMathOperator{\children}{children}
+\DeclareMathOperator{\parent}{parent}
+\DeclareMathOperator{\roots}{roots}
+\DeclareMathOperator{\DF}{DF}
+\DeclareMathOperator{\IDF}{IDF}
 \title{\vspace{-6ex}A modular abstract interpreter for Julia \\ MPRI internship report}
 \author{Oscar Blumberg, supervised by Prof.\@ Alan Edelman, MIT}
 \date{2015}
 \begin{document}
 \onehalfspacing
 \maketitle
-%\pagestyle{empty} %
+
 \thispagestyle{empty}
 \vspace{1.5ex}
 \subsection*{General context}
@@ -115,7 +127,7 @@ We can sketch static analysis in the following way : given some information, $\s
 all the reachable states from $\sigma$ in a reasonable amount of time ?
 
 The most precise answer to this question is the smallest element of $\S$ that both contains $\sigma$ and is stable by $T$. Let's call it $\lfp_\sigma(T)$. This element is exactly the set of all possible traces of executions starting inside $\sigma$. The name lfp stands for least fixed point and in our case we can express it as 
-\[ \text{lfp}_\sigma(T) = \sigma \cup T(\sigma) \cup T^2(\sigma) \cup \dots \]
+\[ \lfp_\sigma(T) = \sigma \cup T(\sigma) \cup T^2(\sigma) \cup \dots \]
 Computing it is not possible : it is equivalent to simulating every execution of the program. Halting problem aside, it is obviously quite unpractical. However, any upper bound of $\lfp_\sigma(T)$ gives us \emph{some} information on the reachable states. Abstract interpretation is a way of describing this process of purposefully losing information. This over-approximation -- or \emph{abstraction} -- of the state space, lowers the precision of the result but makes it computable, both theoretically and realistically.
 
 \paragraph{Abstraction} We will model this voluntary loss by an abstraction function $\alpha:\S\to\oS$ landing in a lattice of our choosing that will approximate $\S$. Given a state $\sigma$, we think of $\alpha(\sigma)$ as the amount of information we want to retain about $\sigma$. We also need a \emph{concretization}, $\gamma:\oS\to\S$, that brings us back to the original state space giving a meaning to elements of $\oS$. The property for this pair of morphism $\alpha,\gamma$ to be a sound abstraction is that $\S\galois{\alpha}{\gamma}\oS$ is a Galois connection, i.e., for any $\sigma\in\S$ and $\overline{\sigma}\in\oS$, we have
@@ -155,11 +167,11 @@ To give a concrete example of such an abstraction -- and avoid breaking with tra
 In this setup, we have $\alpha(\left\{1,3\right\}) = +$ and $\alpha(\left\{-1,3\right\}) = \top$. This abstraction is able to remember that the first set only has positive elements but cannot give any information about the second set.
 
 \paragraph{Transfer} To analyze a program, we will compute in $\oS$ instead of $\S$, making it tractable. The missing piece is now to translate the program's semantic in the abstracted state space. We will call this abstracted transfer morphism $\overline{T}:\oS\to\oS$. The most precise possible choice for $\overline{T}$ is given by
-\[ \overline{T}_{exact} = \alpha\circ T\circ \gamma \]
-however this is not a practical definition since it involves computing in $\S$. Any upper bound of $\overline{T}_{exact}$ for the pointwise order will still give rise to a sound abstraction of $T$, albeit less precise. It depends on the choice of $\alpha,\gamma$ whether it is or not possible to express $\overline{T}_{exact}$ in a computable manner.
+\[ \overline{T}_{\text{exact}} = \alpha\circ T\circ \gamma \]
+however this is not a practical definition since it involves computing in $\S$. Any upper bound of $\overline{T}_{\text{exact}}$ for the pointwise order will still give rise to a sound abstraction of $T$, albeit less precise. It depends on the choice of $\alpha,\gamma$ whether it is or not possible to express $\overline{T}_{\text{exact}}$ in a computable manner.
 
 Once a sound $\overline{T}$ is choosen, we can compute an approximation of the program's behavior by the identity
-\[ \text{lfp}_\sigma(T) \leq \gamma(\text{lfp}_{\alpha(\sigma)}(\overline{T})) \]
+\[ \lfp_\sigma(T) \leq \gamma(\lfp_{\alpha(\sigma)}(\overline{T})) \]
 In other words, we can \emph{execute} the program in $\oS$ using $\overline{T}$, instead of in $\S$ using $T$, and use the resulting information with the guarantee that the actual program behavior is described by the abstract behavior.
 
 As an example, consider the following program in a toy imperative language with a single variable :
@@ -183,7 +195,7 @@ We will assume that the goal of this contrived analysis is to prove that $x$ has
 \]
 but computing this result would require up to a thousand iterations. If instead we compute the values of $x$ in the sign domain, the fixed point is reached in a single loop iteration because the sign of $x$ does not change. Moreover, we would still be able to conclude since we were only interested in the resulting sign of $x$ in the first place.
 
-Although this trivial example only deals with abstracting values, a fundamental trait of abstract interpretation is that the whole state of the program -- or rather it's interpreter -- can be abstracted in the same framework. This allows us to treat uniformly, at least on the proof level, the loss of precision due to value approximation and various other simplifications, such as context/path/flow-insensitivity or the choices of modeling for the program heap. 
+Although this trivial example only deals with abstracting values, a fundamental trait of abstract interpretation is that the whole state of the program -- or rather its interpreter -- can be abstracted in the same framework. This allows us to treat uniformly, at least on the proof level, the loss of precision due to value approximation and various other simplifications, such as context/path/flow-insensitivity or the choices of modeling for the program heap. 
 
 
 \paragraph{Product domains} Having a generic language also opens the opportunity for generic constructs, such as the reduced product. Given two abstract domains $D_1$ and $D_2$ we want to build a combination of those that carries at least as much information. The first natural choice could be the cartesian product, however there is no advantage in computing in $D_1\times D_2$ compared to running two separate analysis. We can instead, given two reduction maps $r_1:D_1\times D_2\to D_1$ and $r_2:D_2\times D_1\to D_2$, form the so called reduced product $D_1 \otimes D_2$ under some soundness conditions. [note: same as fibered product in the category associated to the order] Elements $s_1\otimes s_2$ of $D_1 \otimes D_2$ verify the property that $r_1(s_1,s_2) = s_1$ and $r_2(s_2,s_1) = s_2$. Intuitively, $r_1$ and $r_2$ provide cross domain intersection -- or meet. That is, they must verify
@@ -245,7 +257,7 @@ We can see that the arguments can be provided in different domain than that of i
 Due do space constraints, we relegate to the appendix another example that demonstrates the construction of a \emph{finite disjunction} domain that is parametric over any other domain and can thus serve as a composable building block. It can be used to enhance precision while keeping the implementation simple and decoupled.
 Those two examples illustrate the benefits of the pervasive use of ad-hoc polymorphism and multiple dispatch in Julia : it allows for the construction of reusable abstractions.
 
-Several important opt-in features for value domains and their transfer functions were not described here for the sake of brevity. This includes widening, participation in the dispatch machinery, the ability to control the propagation of values over function call boundaries, as well as state-altering actions such as exception raising or heap operations.
+Several important opt-in features for value domains and their transfer functions were not described here for the sake of brevity. This includes fused join-comparisons, widening, participation in the dispatch machinery, the ability to control the propagation of values over function call boundaries, as well as state-altering actions such as exception raising or heap operations.
 
 \section*{Julia's semantic}
 
@@ -283,7 +295,7 @@ in the following presentation.
 
 The Green fairy is oriented towards building flow-sensitive analysis, that is, it provides information dependent on the program point.
 A simple way to implement a flow-sensitive computation is to store a dense mapping of program points to interpreter state. It has the benefit of being oblivious to the structure of said state.
-However, as the state or the analyzed program gets larger, there is a growing cost associated to the copying of those state atoms.
+However, as the state or the analyzed program gets larger, there is a growing cost associated to the copying and comparison of those state atoms.
 In the vast majority of cases, the states at two nearby program points is highly redundant and taking advantage of this redundancy can lead to consequent improvements in analysis performance. Exploiting this so-called \emph{spatial} sparsity of the state space is an important design point of our implementation.
 
 We use a sparse representation of state that accomodates any non-relational user-defined domain for forward analysis in a transparent manner.
@@ -337,20 +349,46 @@ out(a)
       (n2.south) edge[->] (n3.north east);
 \end{tikzpicture}
 \end{minipage}
+\begin{minipage}[t]{0.30\linewidth}
+\null
+\begin{tikzpicture}[scale=.5]
+\node[] (n0) {
+  $a_0 = 0$
+};
+\node[below=of n0] (middle){};
+\node[left=of middle] (n1) {
+  $a_1 = 3$
+};
+\node[right=of middle] (n2) {
+  $a_2 = 2$
+  };
+\node[below=of middle] (n3) {
+\begin{tabular}{c}
+  $a_3 = \phi(a_1, a_2)$ \\
+  $\text{out}(a_3)$
+\end{tabular}
+  };
+\draw (n0.south) edge[->] node[above]{\small ?} (n1.north)
+      (n0.south) edge[->] node[above]{\small $\neg$ ?} (n2.north)
+      (n1.south) edge[->] (n3.north west)
+      (n2.south) edge[->] (n3.north east);
+\end{tikzpicture}
+\end{minipage}
+
 
 \hfill
 
-A complete treatment of SSA and a profusion of related optimization techniques are available in the excellent \emph{SSA Book}\cite{ssa-book}. We will still sketch here a few important ideas about SSA, and how they apply more generally.
+A complete treatment of SSA and a profusion of related optimization techniques are available in the excellent SSA Book\cite{ssa-book}. We will still sketch here a few important ideas about SSA, and how they apply more generally.
 
 \paragraph{Dominator tree} A central matter in the SSA transform is the question of where in the program $\phi$ nodes insertions are needed.
 This leads us to introduce the notion of domination : we say that a program point $a$ \emph{dominates} another point $b$ if any path in the CFG starting at the root node that reaches $b$ has to go through $a$ first. The domination relation is a partial order over program points and is moreover a tree (every initial segment is well ordered). It is usually called the dominator tree. In our case, since every path to a program point has to go through the head of its containing EBB -- and all the points between the head and itself -- we will say that a program point dominates an EBB if it dominates its head. Given an EBB, the program point being its parent in the dominator tree is called the \emph{immediate dominator}.
 
-The fundamental property of SSA form is then stated as follows : \emph{every use of a variable is dominated by a definition of said variable}. This is, of course, considering $\phi$ nodes as definitions. We can deduce a superset of locations where we have to insert $\phi s$ for the property to hold.
-We will call the dominance frontier of a program point $a$, noted $DF(a)$, the set of EBB heads that, while not being dominated by $a$, have predecessors that are. $DF(a)$ is the set of nodes that one has to visit in order to, starting from $a$, leave its domination.
-Following the usual convention, we note $IDF(a) = \text{lfp}_aDF$ the iterated dominance frontier of $a$.
-If a variable $v$ has two definitions at $a$ and $b$ respectively, we can disambiguate between them by inserting $\phi$ nodes in a subset of $IDF(a)\cap IDF(b)$.
+The fundamental property of SSA form is then stated as follows : \emph{every use of a variable is dominated by a definition of said variable}. This is considering $\phi$ nodes as being a definition in their EBB but an use at the \emph{predecessor edges origins}. We can deduce a superset of locations where we have to insert $\phi s$ for the property to hold.
+We will call the dominance frontier of a program point $a$, noted $\DF(a)$, the set of EBB heads that, while not being dominated by $a$, have predecessors that are. $\DF(a)$ is the set of nodes that one has to visit in order to, starting from $a$, leave its domination.
+Following the usual convention, we note $\IDF(a) = \lfp_a\DF$ the iterated dominance frontier of $a$.
+If a variable $v$ has two definitions at $a$ and $b$ respectively, we can disambiguate between them by inserting $\phi$ nodes in a subset of $\IDF(a)\cap\IDF(b)$.
 This set is an upper bound, because some of those $\phi$ may end up without any use. Computing the minimal $\phi$ placement is harder and requires a form of liveness analysis.
-The advantage of the iterated dominance frontier is that $IDF(a)$ only depends on $a$ and can be cached independently of the variable considered.
+The advantage of the iterated dominance frontier is that $\IDF(a)$ only depends on $a$ and can be cached independently of the variable considered.
 
 In its usual formulation, SSA also implies a renaming of every variable to enforce that, as its name indicates, each one has a single definition site. As a consequence, we can store a global $(\text{name}\to\text{value})$ mapping as a flow-insensitive analysis would, but still get flow-sensitive results.
 
@@ -404,7 +442,7 @@ The main inspiration comes from \cite{ssa-alias} : they develop a sparse alias a
 Assuming that the analyzed code is in SSA form, we can order the set of program variable under the domination relation of their definition.
 That being done, it is clear that when transfering the state over a non-dominating edge, we can trim all heap objects of variables whose definition stopped dominating the current control point. In fact, we can always remove any dead variables from our abstract heap, and non-dominating definitions are always dead thanks to the fundamental property of SSA.
 
-To be slightly more precise, here is a sketch of the transfer function for variable assignment and $\phi$ nodes.
+To be slightly more precise, here is a sketch of the transfer function for variable assignment and $\phi$ nodes with two predecessors.
 \[
 \begin{aligned}
 &T[x=y](o) = \begin{cases}
@@ -412,19 +450,21 @@ o \cup \left\{ x \right\} & \text{if } y \in o \\
 o & \text{otherwise}
 \end{cases}
 \qquad
-T[x=y](H) = \left\{~T[x=y](o)~|~o \in H~\right\} \\
+T[x=y](H) = \Big\{~T[x=y](o)~|~o \in H~\Big\} \\
 & T[\tilde{x}=\tilde{y}] = T[x_1=y_1]\circ\dots\circ T[x_n=y_n] \\
-&T[\phi(\tilde{x}=\tilde{y},\tilde{z})](H_l,H_r) = \big( T[\tilde{x}=\tilde{y}](H_l)\cup T[\tilde{x}=\tilde{z}](H_r) \big)\cap 2^{\text{dom}(\tilde{x})}
+&T[\phi(\tilde{x}=\tilde{y},\tilde{z})](H_l,H_r) = \big( T[\tilde{x}=\tilde{y}](H_l)\cup T[\tilde{x}=\tilde{z}](H_r) \big)\cap 2^{\dom(\tilde{x})}
 \end{aligned}
 \]
 
 where $\text{dom}(\tilde{x})$ is the set of variable having their definition in a dominating position over the $\phi$ node, including itself. It is important to notice that we don't need to remove $x$ from any object when assigning to $x$ since the definition was non-dominating before applying $T$.
 
+As we alluded to in the previous section, one can look at the restriction to dominating definitions as a \emph{summarization} of the state between the $\phi$'s EBB head and its immediate dominator.
+
 From this formulation, we can deduce a sparse format for this simplified ``variable-only'' static shape graph : there is a consequent amount of sharing between subsequent states. In fact, we can see from the transfer functions that they only need to manipulate the ``most recently'' defined variables in each object.
 In \cite{ssa-alias}, this sharing is exploited by representing heap objects as sorted singly-linked list with hash-consing. The elimination of redundancy is thus implicitely handled by the datastructure.
 
 It has the benefit of keeping the implementation close to the mathematical structure, but forces the algorithm to keep the linked list heads of \emph{all} live heap objects at all control points, defeating some of the sparsity.
-We take an alternate route of representing the tree explicitely with pointers in both directions. At the cost of additional lookups along its spine -- much like in the SSA case -- we can cut down the storage at each control point to the set of modified objects.
+We take an alternate route of representing the tree explicitely with pointers in both directions. At the cost of additional lookups along its spine -- much like in the SSA case -- we can cut down the storage at each control point to the set of modified objects. Doing this, we also avoid the need for hash-consing.
 
 \paragraph{Alias tree} The encoding of variable aliasing takes the form of a forest of doubly-linked trees.
 Each node is labelled by a variable definition and several nodes can have the same label.
@@ -432,8 +472,66 @@ This tree respects the dominance ordering of variable definitions.
 The information readily available from this structure is, given a variable $x$, the content of every heap object that $x$ refers to \emph{at the point it was defined}. Each path from a $x$-node to a root is such an object. The set of variable refering to that object is simply the set of labels encountered along the path.
 
 More work has to be done to compute the set of objects refering to $x$ at any point in the program using $x$ : it is the tradeoff we make to keep the storage per control point down.
-Assuming that the definition of $x$ dominates $a$, the set of tree nodes being the heads of objects that $x$ refers to can be characterized by :
+Assuming that $x$ is a definition dominating $a$, the set of tree nodes being the heads of objects that $x$ refers to when the interpreter is at $a$ can be characterized. They are the end-points of paths in the alias tree that starts at an $x$-node and end in a dominating position over $a$.
 
+\begin{algorithm}
+\footnotesize
+\setlength\columnsep{-1pt}
+\begin{multicols}{2}
+\begin{algorithmic}
+\Function{Materialize}{$H$, $a$, $x$}
+\State $d =$ \Call{FindDef}{$x$, $H$, $a$}
+\State $R = \left\{\text{nodes of }H\text{ labeled by }d\right\}$
+\While{$R$ changed}
+\For{$o\in R$}
+\State $C = \children(o\text{ in }H)\cap\dom(a)$
+\If{$C \neq \emptyset$}
+\State $R = \left(R-\{o\}\right)\cup C$
+\EndIf
+\EndFor
+\EndWhile
+\State \Return $R$
+\EndFunction
+\State
+\Function{Transfer[$x=y$]}{$H$, $a$}
+\State $R =$ \Call{Materialize}{$H$, $a$, $y$}
+\For{$r\in R$}
+\State $H,o =$ \Call{AddNode}{$H$, $\text{def}\left[a:x\right]$}
+\State $H =$ \Call{AddEdge}{$H$, $o \to n$}
+\EndFor
+\State \Return $H$
+\EndFunction
+\columnbreak
+\Function{Restrict}{$H$, $\tilde{y}$, $n$, $a$, $b$}
+\State $R = \{ i \to $ \Call{Materialize}{$H$, $a$, $y_i$} $|~i\in\left[1,n\right]\}$
+\While{$R$ changed}
+\For{$i \in \left[1,n\right]$}
+\State $U = R(i) \cap \big(\dom(b)\cup\roots(H)\big)$
+\State $V = \{ \parent(d)~|~d\in R(i) - U\}$
+\State $R = R/i\mapsto U\cup V$
+\EndFor
+\EndWhile
+\State \Return $R$
+\EndFunction
+\State
+\Function{Transfer[$\phi(\tilde{x}=\tilde{y},\tilde{z})$]}{$H_{\text{idom}}$, $a$, $H_l$, $a_l$, $H_r$, $a_r$, $n$}
+\State $H = H_{\text{idom}}$
+\State $R_l =$ \Call{Restrict}{$H_l$, $\tilde{y}$, $n$, $a_l$, $\idom(a)$}
+\State $R_r =$ \Call{Restrict}{$H_r$, $\tilde{z}$, $n$, $a_r$, $\idom(a)$}
+\State $R = \{ i\mapsto R_l(i)\cup R_r(i)~|~i\in\left[1,n\right]\} $
+\For{$d \text{ s.t. } *\mapsto D \in R \text{ and } d\in D$}
+\State $V = \left\{i\in\left[1,n\right]~|~d\in R(i)\right\}$
+\State $H,n =$ \Call{AddNode}{$H$, $\phi\left[a:\tilde{x}_V\right]$}
+\If{$d \in \dom(\idom(a))$}
+\State $H =$ \Call{AddEdge}{$H$, $d\to n$}
+\EndIf
+\EndFor
+\State \Return $H$
+\EndFunction
+\end{algorithmic}
+\end{multicols}
+\caption*{High level description of transfer for sparse variable alias analysis}
+\end{algorithm}
 
 \section*{I can see the future}
 
