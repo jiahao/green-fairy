@@ -218,3 +218,116 @@ function main(w)
     end
 end
 =#
+
+function loc_name(loc)
+    if loc.def.isphi
+        return "phi$(loc.def.pc)_$(loc.inc)ref$(loc.ref_idx)"
+    else
+        return "pc$(loc.def.pc)ref$(loc.ref_idx)"
+    end
+end
+
+function edge_to(io, loc1, loc2, bnd)
+    if loc2.ref_idx != 0 && loc1 != loc2 && loc1.ref_idx != 0
+        @show loc1 loc2
+        println(io, "\\draw[->,thick,black,bend ", (bnd ? "left":"right"),"=3ex] (", loc_name(loc1), ") edge (", loc_name(loc2), ");")
+    end
+end
+
+const COLORS = ["red", "blue", "green", "yellow", "black", "white"]
+
+function to_tikz(sched, fc)
+    c = sched.funs[fc]
+    ls = sched.states.funs[fc]
+
+    
+    
+    io = IOBuffer()
+    println(io, """\\documentclass[14pt]{article}
+            \\usepackage{fullpage}
+            \\usepackage{tabularx}
+            \\usepackage{tikz}
+            \\usetikzlibrary{positioning,arrows.meta,bending,automata}
+            \\usepackage{amsfonts}
+            \\usepackage{setspace}
+            \\usepackage{geometry}
+            \\usepackage{verbatim}""")
+    println(io, """\\geometry{paperwidth=800mm, paperheight=1500pt, left=40pt, top=40pt, textwidth=280pt, marginparsep=20pt, marginparwidth=100pt, textheight=16263pt, footskip=40pt}""")
+    println(io, "\\begin{document}")
+    ncol = length(ls.allocs)
+    cols = join(["c" for _=1:ncol], " ")
+    println(io, """\\tikzstyle{every picture}+=[remember picture]
+            \\begin{tabular}{l|l|$cols}""")
+    colors = Dict{Int,String}()
+    color_i = 1
+    for pc=0:length(c.body)
+        print(io, "$pc & ")
+        if pc > 0 && !isa(c.body[pc], LineNumberNode)
+            print(io, "\\verb~")
+            Meta.show_sexpr(io, c.body[pc])
+            print(io, "~")
+        end
+        print(io, " & ")
+        if pc > 0
+            locset = Any[]
+            for (refi,ref) in enumerate(ls.heap[pc])
+                push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(false,pc),0,refi),ref, ""))
+            end
+            if haskey(ls.phi_heap, pc)
+                for (inci,inc) in enumerate(ls.phi_heap[pc].refs)
+                    for (refi,ref) in enumerate(inc)
+                        msg = string(inci, "/", ref, " ", join(map(i->string(ls.local_names[i]), collect(ls.phi_heap[pc].defs[inci][refi])), ":"))
+                        push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(true,pc),inci,refi), ref, msg))
+                    end
+                end
+            end
+            iov = IOBuffer()
+            i = 0
+            for (alloc_i, alloc) in enumerate(ls.allocs)
+                col = get!(colors, alloc) do
+                        col = COLORS[color_i]
+                        color_i = (color_i+1) % length(COLORS)
+                    col
+                end
+                last_right = ""
+                println(io, "\\begin{tikzpicture}")
+                for (thisloc,ref,str) in locset
+                    alloc == ref.alloc || continue
+                    println(io, "\\node[$col,draw$last_right] (", loc_name(thisloc), ") { ", str, " };")
+                    last_right = ",right=5ex of $(loc_name(thisloc))"
+                    edge_to(iov, thisloc, ref.loc, Bool(i))
+                    #               i = (i+1)%2
+                end
+                println(io, "\\end{tikzpicture}")
+                alloc_i == ncol || println(io, "&")
+            end
+            println(io, "\\begin{tikzpicture}[overlay]")
+            seekstart(iov); write(io, iov)
+            println(io, "\\end{tikzpicture}")
+        end
+        println(io, "\\\\")
+#        println(io, "\\hline")
+    end
+    println(io, "\\end{tabular}")
+    println(io, "\\end{document}")
+    #=
+    
+            \item $a = 0$ \tikz \coordinate (aaa);
+            \item $a = 0$ \tikz \coordinate (aaa2);
+            \item $a = 0$ \tikz \coordinate (aaa3);
+        \end{itemize}
+        \end{minipage}
+        \begin{minipage}{0.4łinewidth}
+            \begin{tikzpicture}
+                \node [draw] (bbb) {hello};
+                \node [draw,below=of bbb] (bbb2) {helloZZ};
+                %\path (1,1) coordinate (bbb);
+                \end{tikzpicture}
+            \end{minipage}
+            \begin{tikzpicture}[overlay]
+                \path[->,thick,black] (aaa) edge[bend left] (bbb);
+                \end{tikzpicture}
+    =#
+    open(f -> print(f, takebuf_string(io)), "out.tex", "w")
+    run(`pdflatex out.tex`)
+end
