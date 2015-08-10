@@ -483,6 +483,7 @@ type LocalStore{V<:Lattice}
     
     sa :: Vector{V} # pc => value
     phis :: Vector{Dict{Int,V}} # local => label => phi value
+    phis_live :: Dict{Int,Vector{Bool}} # label => inc => liveness
     
     len :: Int
     code :: Code
@@ -506,7 +507,9 @@ end
 function LocalStore{V}(::Type{V}, code::Code)
     n = length(code.body)
     LocalStore(Array(LocalName,0),Array(DefStore{Set{Int}},0),
-               V[bot(V) for i=1:n+1], Array(Dict{Int,V},0), n, code, build_dom_tree(code),
+               V[bot(V) for i=1:n+1], Array(Dict{Int,V},0),
+               Dict{Int,Vector{Bool}}(),
+               n, code, build_dom_tree(code),
                
                [Array(HeapRef,0) for i=1:n+1],
                Dict{Int,PhiHeap}(),
@@ -588,7 +591,7 @@ end
 
 # TODO better name
 # TODO move the heap_use API outside, and make it more reasonable
-function propagate_heap!(s, obj, pc, into)
+function propagate_heap!(s, obj, pc, into, exclu)
     obj != :global || return false
     new_heap = Array(HeapRef, 0)
     chgd = false
@@ -600,8 +603,10 @@ function propagate_heap!(s, obj, pc, into)
     elseif isa(obj, Symbol) || isa(obj, GenSym)
         li = findfirst(s.local_names, obj)
         obj = find_def_fast(s.code, s.dtree, s.defs[li], pc)[2]
+        println("FDF $pc $li $obj")
         # TODO this traverses the dom tree a second time, could be more efficient
         p = dom_path_to(s.code, s.dtree, obj, pc)
+        println("DP $p")
         if obj == 0 || obj in s.code.label_pc
             obj = Def(true, obj)
         else
@@ -613,7 +618,7 @@ function propagate_heap!(s, obj, pc, into)
         println("Unknown $obj")
         error()
     end
-    
+    println("GO ===")
     # fill initial heap state
     if !obj.isphi
         for i in eachindex(s.heap[obj.pc])
@@ -637,8 +642,10 @@ function propagate_heap!(s, obj, pc, into)
     # propagate through domination path
     pcur = 1
     curpc = obj.pc
-    while curpc != pc && curpc <= length(s.heap)
-        #println("Going through $curpc for $pc")
+    done = exclu && curpc == pc
+    while !done
+        println("Going through $curpc for $pc $exclu")
+        done = curpc == pc
         if haskey(s.phi_heap, curpc)
             cur = Def(true, curpc)
             phi_heap = s.phi_heap[curpc]
@@ -658,9 +665,8 @@ function propagate_heap!(s, obj, pc, into)
                 end
                 end
                 end=#
-
+                println("doing $curpc/$inc $inc_phi_heap")
                 for i in eachindex(inc_phi_heap)
-                    #println("doing $inc $i")
                     cur_obj = inc_phi_heap[i]
                     #idx = findfirst(new_heap, cur_obj)
                     for idx in eachindex(new_heap)
@@ -690,11 +696,11 @@ function propagate_heap!(s, obj, pc, into)
                 end
             end
             resize!(new_heap, length(new_heap) - n_del)
-            if curpc == 0
+            #=if curpc == 0
                 curpc += 1
             else
                 pcur += 1
-            end
+            end=#
         end
         if curpc != obj.pc
             cur = Def(false, curpc)
@@ -713,9 +719,12 @@ function propagate_heap!(s, obj, pc, into)
         end
         if pcur <= length(p) && curpc == p[pcur][1]
             curpc = p[pcur][2]
+            pcur += 1
         else
             curpc += 1
         end
+        println("chk $curpc $pc $exclu")
+        done |= exclu && curpc == pc
     end
     for obj in new_heap
         chgd2,_ = heap_add!(into, obj)
@@ -736,7 +745,7 @@ function restrict_heap_ref(s, h, pc)
         hlabel = find_label(s.code, h.loc.def.pc)
         hdepth = dom_depth(s.dtree, hlabel)
         @assert hdepth >= 0
-        if h.loc.ref_idx == 0 || hdepth < pcdepth || hdepth == pcdepth && h.loc.def.pc < pc
+        if h.loc.ref_idx == 0 || hdepth < pcdepth || hdepth == pcdepth && h.loc.def.pc <= pc
             if h.loc.ref_idx == 0
                 h = birthday(h, gen-h.gen)
             end
@@ -784,6 +793,28 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             s.phis[li][0] = bot(V)
         end
     end
+    
+    # update phi pred liveness
+    next_lbl = findfirst(s.code.label_pc, next)
+    if next_lbl > 0
+        preds = s.dtree.pred[next_lbl]
+        liveness = get!(s.phis_live, next_lbl) do
+            fill(false, length(preds))
+        end
+        found = false
+        for i in eachindex(preds)
+            if preds[i][2] == pc
+                found = true
+                if !liveness[i]
+                    liveness[i] = true
+                    chgd = true
+                end
+                break
+            end
+        end
+        @assert(found)
+    end
+    
     # update phis
     lbl = findfirst(s.code.label_pc, pc)
     if lbl > 0
@@ -866,37 +897,53 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                 push!(phi_heap.refs, Array(HeapRef,0))
                 push!(phi_heap.defs, Array(Set{Int},0))
             end
+            s.phis_live[lbl][i] || continue
 
-            # TODO must be kept in sync with is_mergeable
-            name_mapping = Dict{Tuple{HeapLoc,Int},Tuple{HeapRef,Set{Int}}}()
-            dbg = lbl==3
+            # restricted => actual => locals
+            name_mapping = Dict{HeapRef,Dict{HeapRef,Set{Int}}}()
+            dbg = lbl==4
             for li = 1:length(s.local_names)
                 k = s.local_names[li]
                 additional = Array(HeapRef,0)
-                propagate_heap!(s, k, pred, additional)
+                propagate_heap!(s, k, pred, additional, false)
                 if dbg
                     println("Loc $pred $k $additional")
                 end
                 for ref in additional
-                    ref = restrict_heap_ref(s, ref, idom_pc)
-                    dbg && println("\tres $ref")
-                    push!(get!(name_mapping, (ref.loc,ref.alloc), (ref,Set{Int}()))[2], li)
+                    restricted_ref = restrict_heap_ref(s, ref, idom_pc)
+                    dbg && println("\tres $ref $restricted_ref $idom_pc")
+                    actual_refs = get!(name_mapping, restricted_ref, Dict{HeapRef,Set{Int}}())
+                    push!(get!(actual_refs, ref, Set{Int}()), li)
+                end
+            end
+            summarized = Dict{HeapLoc,Tuple{HeapRef,Set{Set{Int}}}}()
+            for (ref,actual_refs) in name_mapping
+                for (_,names) in actual_refs
+                    other_ref, names_set = get!(summarized,ref.loc,(ref,Set{Set{Int}}()))
+                    summarized[ref.loc] = (join(other_ref, ref), names_set)
+                    push!(names_set, names)
                 end
             end
             # commit the changes
             for (ref_i, ref) in enumerate(phi_heap.refs[i])
-                key = (ref.loc,ref.alloc)
-                if haskey(name_mapping, key)
-                    if name_mapping[key][2] == phi_heap.defs[i][ref_i]
-                        pop!(name_mapping, key)
+                if haskey(summarized, ref.loc)
+                    other_ref, names_set = summarized[ref.loc]
+                    for locals in names_set
+                        if locals == phi_heap.defs[i][ref_i]
+                            pop!(names_set, locals)
+                            phi_heap.refs[i][ref_i] = join(other_ref, ref)
+                            #println("DEL $ref $actual")
+                        end
                     end
                 end
             end
 
-            for (k,(ref,names)) in name_mapping
-                push!(phi_heap.refs[i], ref)
-                push!(phi_heap.defs[i], names)
-                chgd = true
+            for (refloc,(ref, locals)) in summarized
+                for names in locals
+                    push!(phi_heap.refs[i], ref)
+                    push!(phi_heap.defs[i], names)
+                    chgd = true
+                end
             end
         end
     end
@@ -927,7 +974,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             parent,field = obj
             @assert(field > 0) # TODO unknown fields
             parent_heap = Array(HeapRef, 0)
-            propagate_heap!(s, parent, pc, parent_heap)
+            propagate_heap!(s, parent, pc, parent_heap, true)
             field_targets = Array(HeapLoc, 0)
 
             phi_h = get!(s.phi_heap, pc) do
@@ -943,7 +990,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                 empty!(field_targets)
             end
         else
-            chgd |= propagate_heap!(s, obj, pc, s.heap[pc])
+            chgd |= propagate_heap!(s, obj, pc, s.heap[pc], true)
         end
     end
 
@@ -952,9 +999,9 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         @assert(field > 0) # TODO unknown fields
         # TODO could optimize away if pc close to parent/child
         parent_heap = Array(HeapRef,0)
-        propagate_heap!(s, parent, pc, parent_heap)
+        propagate_heap!(s, parent, pc, parent_heap, true)
         child_heap = Array(HeapRef,0)
-        propagate_heap!(s, child, pc, child_heap)
+        propagate_heap!(s, child, pc, child_heap, true)
 
         phi_h = get!(s.phi_heap, pc) do
             ph = PhiHeap()
@@ -1447,7 +1494,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,env,args::Ve
         callee_heaprefs = initial.heap
         for (i,arg) in enumerate(args_sa)
             #@show heaprefs i
-            propagate_heap!(sched.states.funs[t.fc], arg, t.pc, heaprefs[i])
+            propagate_heap!(sched.states.funs[t.fc], arg, t.pc, heaprefs[i], true)
             some_not_found = false
             for hr in heaprefs[i]
                 for j = i-1:-1:1

@@ -230,7 +230,8 @@ end
 function edge_to(io, loc1, loc2, bnd)
     if loc2.ref_idx != 0 && loc1 != loc2 && loc1.ref_idx != 0
         @show loc1 loc2
-        println(io, "\\draw[->,thick,black,bend ", (bnd ? "left":"right"),"=3ex] (", loc_name(loc1), ") edge (", loc_name(loc2), ");")
+        bend = string(",bend ", (bnd ? "left":"right"),"=3ex")
+        println(io, "\\draw[->,thick,black", "] (", loc_name(loc1), ") edge (", loc_name(loc2), ");")
     end
 end
 
@@ -252,7 +253,7 @@ function to_tikz(sched, fc)
             \\usepackage{setspace}
             \\usepackage{geometry}
             \\usepackage{verbatim}""")
-    println(io, """\\geometry{paperwidth=800mm, paperheight=1500pt, left=40pt, top=40pt, textwidth=280pt, marginparsep=20pt, marginparwidth=100pt, textheight=16263pt, footskip=40pt}""")
+    println(io, """\\geometry{paperwidth=2000mm, paperheight=800pt, left=40pt, top=40pt, textwidth=2000mm, marginparsep=20pt, marginparwidth=100pt, textheight=16263pt, footskip=40pt}""")
     println(io, "\\begin{document}")
     ncol = length(ls.allocs)
     cols = join(["c" for _=1:ncol], " ")
@@ -276,7 +277,8 @@ function to_tikz(sched, fc)
             if haskey(ls.phi_heap, pc)
                 for (inci,inc) in enumerate(ls.phi_heap[pc].refs)
                     for (refi,ref) in enumerate(inc)
-                        msg = string(inci, "/", ref, " ", join(map(i->string(ls.local_names[i]), collect(ls.phi_heap[pc].defs[inci][refi])), ":"))
+                        msg = ""#string(inci, "/", ref, " ")
+                        msg *= join(map(i->string(ls.local_names[i]), collect(ls.phi_heap[pc].defs[inci][refi])), ":")
                         push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(true,pc),inci,refi), ref, msg))
                     end
                 end
