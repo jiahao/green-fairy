@@ -469,7 +469,7 @@ join(hr::HeapRef,hr2::HeapRef) = (@assert(is_mergeable(hr,hr2)); HeapRef(hr.loc 
 typealias HeapRefs Vector{HeapRef}
 
 const MAX_GEN = 5
-const MAX_GEN_ALLOC = 2
+const MAX_GEN_ALLOC = 5
 
 immutable PhiHeap
     refs :: Vector{HeapRefs} # inc => refs
@@ -591,7 +591,7 @@ end
 
 # TODO better name
 # TODO move the heap_use API outside, and make it more reasonable
-function propagate_heap!(s, obj, pc, into, exclu)
+function propagate_heap!(s, obj, pc, into, exclu, debug=false)
     obj != :global || return false
     new_heap = Array(HeapRef, 0)
     chgd = false
@@ -603,10 +603,8 @@ function propagate_heap!(s, obj, pc, into, exclu)
     elseif isa(obj, Symbol) || isa(obj, GenSym)
         li = findfirst(s.local_names, obj)
         obj = find_def_fast(s.code, s.dtree, s.defs[li], pc)[2]
-        println("FDF $pc $li $obj")
         # TODO this traverses the dom tree a second time, could be more efficient
         p = dom_path_to(s.code, s.dtree, obj, pc)
-        println("DP $p")
         if obj == 0 || obj in s.code.label_pc
             obj = Def(true, obj)
         else
@@ -618,7 +616,6 @@ function propagate_heap!(s, obj, pc, into, exclu)
         println("Unknown $obj")
         error()
     end
-    println("GO ===")
     # fill initial heap state
     if !obj.isphi
         for i in eachindex(s.heap[obj.pc])
@@ -638,13 +635,15 @@ function propagate_heap!(s, obj, pc, into, exclu)
             end
         end
     end
-
+    if debug
+        println("Starting with $new_heap")
+    end
     # propagate through domination path
     pcur = 1
     curpc = obj.pc
     done = exclu && curpc == pc
     while !done
-        println("Going through $curpc for $pc $exclu")
+#        println("Going through $curpc for $pc $exclu")
         done = curpc == pc
         if haskey(s.phi_heap, curpc)
             cur = Def(true, curpc)
@@ -652,6 +651,7 @@ function propagate_heap!(s, obj, pc, into, exclu)
             new_heap_replace = fill(0, length(new_heap))
             new_heap_dgen = fill(0, length(new_heap))
             #println("phi for $(s.local_names[li]) : $phi_heap")
+            new_heap_indices = eachindex(new_heap) # will be grown so hoist this
             for inc in eachindex(phi_heap.refs)
                 inc_phi_heap = phi_heap.refs[inc]
                 # find the index of this inc in the predecessor list
@@ -665,20 +665,20 @@ function propagate_heap!(s, obj, pc, into, exclu)
                 end
                 end
                 end=#
-                println("doing $curpc/$inc $inc_phi_heap")
+                #                println("doing $curpc/$inc $inc_phi_heap")
                 for i in eachindex(inc_phi_heap)
                     cur_obj = inc_phi_heap[i]
                     #idx = findfirst(new_heap, cur_obj)
-                    for idx in eachindex(new_heap)
+                    for idx in new_heap_indices
                         new_heap_ref = new_heap[idx]
                         if cur_obj == new_heap_ref
                             push!(new_heap, HeapRef(HeapLoc(cur, inc, i), cur_obj.gen, cur_obj.alloc,cur_obj.outside))
                             new_heap_replace[idx] += 1
-                        else
-#=                            haskey(s.phi_heap_gen, curpc) || continue
+                        elseif obj.pc != curpc
+                            haskey(s.phi_heap_gen, curpc) || continue
                             allocs_dgen = s.phi_heap_gen[curpc]
                             haskey(allocs_dgen, new_heap_ref.alloc) || continue
-                            new_heap_dgen[idx] = max(new_heap_dgen[idx], get(allocs_dgen[new_heap_ref.alloc], phi_inc_idx, 0))=#
+                            new_heap_dgen[idx] = max(new_heap_dgen[idx], get(allocs_dgen[new_heap_ref.alloc], i, 0))
                         end
                     end
                 end
@@ -712,6 +712,10 @@ function propagate_heap!(s, obj, pc, into, exclu)
                     if new_heap_ref == cur_obj
                         new_heap[idx] = HeapRef(HeapLoc(cur, 0, i), cur_obj.gen, cur_obj.alloc, cur_obj.outside)
                     elseif new_heap_ref.alloc == curpc
+                        if debug
+                            println("Birthday for $pc at $curpc")
+                            println("\t$new_heap_ref")
+                        end
                         new_heap[idx] = birthday(new_heap[idx], 1)
                     end
                 end
@@ -723,7 +727,6 @@ function propagate_heap!(s, obj, pc, into, exclu)
         else
             curpc += 1
         end
-        println("chk $curpc $pc $exclu")
         done |= exclu && curpc == pc
     end
     for obj in new_heap
@@ -747,6 +750,7 @@ function restrict_heap_ref(s, h, pc)
         @assert hdepth >= 0
         if h.loc.ref_idx == 0 || hdepth < pcdepth || hdepth == pcdepth && h.loc.def.pc <= pc
             if h.loc.ref_idx == 0
+                #println("Promote by restrict : $(gen-h.gen) $h")
                 h = birthday(h, gen-h.gen)
             end
             return h
@@ -822,12 +826,15 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         idom_lbl,idom_pc = s.dtree.idom[lbl]
         # update phi heapgens
         dgens = Dict{Int,Int}()
+#        println("Compute dgen for $pc")
         for (pred_i,(pred_lbl,pred_pc)) in enumerate(s.dtree.pred[lbl])
             last_statements = (pred_lbl == 0 || pred_lbl == idom_lbl)
             # count allocations up the dom tree
+#            println("\t pred $pred_pc")
             while pred_lbl != 0 && pred_lbl != idom_lbl || last_statements
                 # count allocation in this EBB
                 pred_entry_pc = last_statements ? idom_pc : s.code.label_pc[pred_lbl]
+#                println("\t counting between $pred_entry_pc => $pred_pc")
                 lb,ub = searchsortedfirst(s.allocs, pred_entry_pc), searchsortedlast(s.allocs, pred_pc)
                 for i = lb:ub
                     alloc = s.allocs[i]
@@ -901,45 +908,49 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
 
             # restricted => actual => locals
             name_mapping = Dict{HeapRef,Dict{HeapRef,Set{Int}}}()
-            dbg = lbl==4
+
             for li = 1:length(s.local_names)
                 k = s.local_names[li]
                 additional = Array(HeapRef,0)
-                propagate_heap!(s, k, pred, additional, false)
-                if dbg
-                    println("Loc $pred $k $additional")
-                end
+                println("========== $pc / $li")
+                propagate_heap!(s, k, pred, additional, false, lbl==3)
+                println("\tRes $additional")
                 for ref in additional
                     restricted_ref = restrict_heap_ref(s, ref, idom_pc)
-                    dbg && println("\tres $ref $restricted_ref $idom_pc")
                     actual_refs = get!(name_mapping, restricted_ref, Dict{HeapRef,Set{Int}}())
                     push!(get!(actual_refs, ref, Set{Int}()), li)
                 end
             end
-            summarized = Dict{HeapLoc,Tuple{HeapRef,Set{Set{Int}}}}()
+            summarized = Dict{HeapLoc,Set{Tuple{HeapRef,Set{Int}}}}()
             for (ref,actual_refs) in name_mapping
                 for (_,names) in actual_refs
-                    other_ref, names_set = get!(summarized,ref.loc,(ref,Set{Set{Int}}()))
-                    summarized[ref.loc] = (join(other_ref, ref), names_set)
-                    push!(names_set, names)
+                    names_set = get!(summarized,ref.loc,Set{Tuple{HeapRef,Set{Int}}}())
+                    push!(names_set, (ref, names))
                 end
+            end
+            if pc == 16
+                @show summarized
             end
             # commit the changes
             for (ref_i, ref) in enumerate(phi_heap.refs[i])
                 if haskey(summarized, ref.loc)
-                    other_ref, names_set = summarized[ref.loc]
-                    for locals in names_set
+                    names_set = summarized[ref.loc]
+                    for (other_ref, locals) in names_set
                         if locals == phi_heap.defs[i][ref_i]
-                            pop!(names_set, locals)
-                            phi_heap.refs[i][ref_i] = join(other_ref, ref)
+                            pop!(names_set, (other_ref,locals))
+                            joined_ref = join(other_ref, ref)
+                            if ref != joined_ref
+                                phi_heap.refs[i][ref_i] = joined_ref
+                                chgd = true
+                            end
                             #println("DEL $ref $actual")
                         end
                     end
                 end
             end
 
-            for (refloc,(ref, locals)) in summarized
-                for names in locals
+            for (refloc,locals) in summarized
+                for (ref,names) in locals
                     push!(phi_heap.refs[i], ref)
                     push!(phi_heap.defs[i], names)
                     chgd = true

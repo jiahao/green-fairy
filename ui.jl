@@ -272,12 +272,15 @@ function to_tikz(sched, fc)
         if pc > 0
             locset = Any[]
             for (refi,ref) in enumerate(ls.heap[pc])
-                push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(false,pc),0,refi),ref, ""))
+                msg = ""
+                msg *= string(ref.gen)
+                push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(false,pc),0,refi),ref, msg))
             end
             if haskey(ls.phi_heap, pc)
                 for (inci,inc) in enumerate(ls.phi_heap[pc].refs)
                     for (refi,ref) in enumerate(inc)
                         msg = ""#string(inci, "/", ref, " ")
+                        msg *= string(ref.gen, ":")
                         msg *= join(map(i->string(ls.local_names[i]), collect(ls.phi_heap[pc].defs[inci][refi])), ":")
                         push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(true,pc),inci,refi), ref, msg))
                     end
