@@ -23,6 +23,7 @@
 \usepackage[T1]{fontenc}
 \lstdefinelanguage{julia}{
   basicstyle=\small\ttfamily,
+  basewidth=0.5em,
   showspaces=false,
   showstringspaces=false,
   keywordstyle={\textbf},
@@ -96,9 +97,9 @@ Besides tying up the various technical loose ends and improving the non-algorith
 
 A consequent amount of technical work has to be done to make the later stages of the compiler modular enough that the friction in taking advantage of new information from the analysis becomes much lower. In particular, we plan to implement optimizations using the shape analysis to provide precise no-escape information that will allow memory reuse and stack allocation, greatly reducing the load on the garbage collector and the dynamic allocator.
 
-In the longer term, the natural extension to this work is to devisef an intuitive interface that makes it possible for users to extend the abstract state of the interpreter with domain-specific informations. We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use.
+In the longer term, the natural extension to this work is to devise an intuitive interface that makes it possible for users to extend the abstract state of the interpreter with domain-specific informations. We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use.
 
-Those points are developped further along in the report.
+Those points are developed further along in the report.
 
 \break
 
@@ -126,13 +127,13 @@ In fact, we can think of this order as a measure of the information given by the
 We can sketch static analysis in the following way : given some information, $\sigma\in\S$, about the state of a program, what can be deduced about
 all the reachable states from $\sigma$ in a reasonable amount of time ?
 
-The most precise answer to this question is the smallest element of $\S$ that both contains $\sigma$ and is stable by $T$. Let's call it $\lfp_\sigma(T)$. This element is exactly the set of all possible traces of executions starting inside $\sigma$. The name lfp stands for least fixed point and in our case we can express it as 
+The most precise answer to this question is the smallest element of $\S$ that both contains $\sigma$ and is stable by $T$. Let's call it $\lfp_\sigma(T)$. This element is exactly the set of all possible traces of executions starting inside $\sigma$. The name lfp stands for least fixed point and in our case we can express it as
 \[ \lfp_\sigma(T) = \sigma \cup T(\sigma) \cup T^2(\sigma) \cup \dots \]
 Computing it is not possible : it is equivalent to simulating every execution of the program. Halting problem aside, it is obviously quite unpractical. However, any upper bound of $\lfp_\sigma(T)$ gives us \emph{some} information on the reachable states. Abstract interpretation is a way of describing this process of purposefully losing information. This over-approximation -- or \emph{abstraction} -- of the state space, lowers the precision of the result but makes it computable, both theoretically and realistically.
 
 \paragraph{Abstraction} We will model this voluntary loss by an abstraction function $\alpha:\S\to\oS$ landing in a lattice of our choosing that will approximate $\S$. Given a state $\sigma$, we think of $\alpha(\sigma)$ as the amount of information we want to retain about $\sigma$. We also need a \emph{concretization}, $\gamma:\oS\to\S$, that brings us back to the original state space giving a meaning to elements of $\oS$. The property for this pair of morphism $\alpha,\gamma$ to be a sound abstraction is that $\S\galois{\alpha}{\gamma}\oS$ is a Galois connection, i.e., for any $\sigma\in\S$ and $\overline{\sigma}\in\oS$, we have
 \[ \sigma \leq \gamma(\overline{\sigma}) \iff \alpha(\sigma) \leq \overline{\sigma} \]
-To give a concrete example of such an abstraction -- and avoid breaking with tradition -- consider $\S = 2^{\mathbb{N}}$ and $\oS = \{\bot,-,0,+,\top\}$ where we want to approximate any set of integers by its sign information. The pair of mapping would be the following :
+To give a concrete example of such an abstraction -- and avoid breaking with tradition -- consider $\S = 2^{\mathbb{N}}$ and $\oS = \{\bot,-,0,+,\top\}$ where we want to approximate any set of integers by its sign information. The pair of mapping would be the following:
 
 \hfill
 
@@ -170,11 +171,11 @@ In this setup, we have $\alpha(\left\{1,3\right\}) = +$ and $\alpha(\left\{-1,3\
 \[ \overline{T}_{\text{exact}} = \alpha\circ T\circ \gamma \]
 however this is not a practical definition since it involves computing in $\S$. Any upper bound of $\overline{T}_{\text{exact}}$ for the pointwise order will still give rise to a sound abstraction of $T$, albeit less precise. It depends on the choice of $\alpha,\gamma$ whether it is or not possible to express $\overline{T}_{\text{exact}}$ in a computable manner.
 
-Once a sound $\overline{T}$ is choosen, we can compute an approximation of the program's behavior by the identity
+Once a sound $\overline{T}$ is chosen, we can compute an approximation of the program's behavior by the identity
 \[ \lfp_\sigma(T) \leq \gamma(\lfp_{\alpha(\sigma)}(\overline{T})) \]
 In other words, we can \emph{execute} the program in $\oS$ using $\overline{T}$, instead of in $\S$ using $T$, and use the resulting information with the guarantee that the actual program behavior is described by the abstract behavior.
 
-As an example, consider the following program in a toy imperative language with a single variable :
+As an example, consider the following program in a toy imperative language with a single variable:
 
 \begin{algorithmic}[1]
 \State $x = 1$
@@ -184,7 +185,7 @@ As an example, consider the following program in a toy imperative language with 
 \end{algorithmic}
 
 
-We will assume that the goal of this contrived analysis is to prove that $x$ has to be positive by the time the program ends. The first abstraction step is to trim the large state space of traces into a more manageable domain. We will collapse each trace into its last step in the form of a tuple $\left(pc,x:v\right)$ where $pc$ is the program point and $v$ the value of $x$. One abstract state of this first domain can be seen as a mapping from program control points to sets of possible integers. In our case, the result after program execution -- when the fixpoint of $\overline{T}$ is reached -- would be
+We will assume that the goal of this contrived analysis is to prove that $x$ has to be positive by the time the program ends. The first abstraction step is to trim the large state space of traces into a more manageable domain. We will collapse each trace into its last step in the form of a tuple $\left(pc,x:v\right)$ where $pc$ is the program point and $v$ the value of $x$. One abstract state of this first domain can be seen as a mapping from program control points to sets of possible integers. In our case, the result after program execution -- when the fixed point of $\overline{T}$ is reached -- would be
 \[
 \begin{cases}
 1 \mapsto & x:\{1\} \\
@@ -195,10 +196,10 @@ We will assume that the goal of this contrived analysis is to prove that $x$ has
 \]
 but computing this result would require up to a thousand iterations. If instead we compute the values of $x$ in the sign domain, the fixed point is reached in a single loop iteration because the sign of $x$ does not change. Moreover, we would still be able to conclude since we were only interested in the resulting sign of $x$ in the first place.
 
-Although this trivial example only deals with abstracting values, a fundamental trait of abstract interpretation is that the whole state of the program -- or rather its interpreter -- can be abstracted in the same framework. This allows us to treat uniformly, at least on the proof level, the loss of precision due to value approximation and various other simplifications, such as context/path/flow-insensitivity or the choices of modeling for the program heap. 
+Although this trivial example only deals with abstracting values, a fundamental trait of abstract interpretation is that the whole state of the program -- or rather its interpreter -- can be abstracted in the same framework. This allows us to treat uniformly, at least on the proof level, the loss of precision due to value approximation and various other simplifications, such as context/path/flow-insensitivity or the choices of modeling for the program heap.
 
 
-\paragraph{Product domains} Having a generic language also opens the opportunity for generic constructs, such as the reduced product. Given two abstract domains $D_1$ and $D_2$ we want to build a combination of those that carries at least as much information. The first natural choice could be the cartesian product, however there is no advantage in computing in $D_1\times D_2$ compared to running two separate analysis. We can instead, given two reduction maps $r_1:D_1\times D_2\to D_1$ and $r_2:D_2\times D_1\to D_2$, form the so called reduced product $D_1 \otimes D_2$ under some soundness conditions. [note: same as fibered product in the category associated to the order] Elements $s_1\otimes s_2$ of $D_1 \otimes D_2$ verify the property that $r_1(s_1,s_2) = s_1$ and $r_2(s_2,s_1) = s_2$. Intuitively, $r_1$ and $r_2$ provide cross domain intersection -- or meet. That is, they must verify
+\paragraph{Product domains} Having a generic language also opens the opportunity for generic constructs, such as the reduced product. Given two abstract domains $D_1$ and $D_2$ we want to build a combination of those that carries at least as much information. The first natural choice could be the Cartesian product, however there is no advantage in computing in $D_1\times D_2$ compared to running two separate analysis. We can instead, given two reduction maps $r_1:D_1\times D_2\to D_1$ and $r_2:D_2\times D_1\to D_2$, form the so called reduced product $D_1 \otimes D_2$ under some soundness conditions. [note: same as fibered product in the category associated to the order] Elements $s_1\otimes s_2$ of $D_1 \otimes D_2$ verify the property that $r_1(s_1,s_2) = s_1$ and $r_2(s_2,s_1) = s_2$. Intuitively, $r_1$ and $r_2$ provide cross domain intersection -- or meet. That is, they must verify
 \begin{align*}
 r_1(s_1,s_2) \leq s_1~\text{and}~ \gamma_1(r_1(s_1,s_2)) \leq \gamma_2(s_2) \\
 r_2(s_2,s_1) \leq s_2~\text{and}~ \gamma_2(r_2(s_2,s_1)) \leq \gamma_1(s_1)
@@ -237,7 +238,7 @@ end
 It should be noted that this domain is parametric over any ordered numeric types having an upper and lower bound. Defining the \verb~isbot~ function is necessary since there are multiple representation of $\bot$ however the generic \verb~istop~ fallback is correct in that case.
 
 The \verb~meet_ext~ function is the product domain reduction function. In that case we express that the knowledge that a value is constant can reduce an interval to a single point or $\bot$ depending on the particular value. We are free to add other definitions to this function to increase precision using information from other domains.
-Defining this function gives the interpreter the ability to evaluate literals, as well as propagated constants, in the interval domain. In fact, the only difference between \verb~Const~ and first-class user defined domains is its built-in use by the interpreter when a literal value is encountered. 
+Defining this function gives the interpreter the ability to evaluate literals, as well as propagated constants, in the interval domain. In fact, the only difference between \verb~Const~ and first-class user defined domains is its built-in use by the interpreter when a literal value is encountered.
 
 Providing transfer functions is also straightforward, as demonstrated by this simple example for addition of intervals :
 \begin{singlespace}
@@ -298,12 +299,12 @@ A simple way to implement a flow-sensitive computation is to store a dense mappi
 However, as the state or the analyzed program gets larger, there is a growing cost associated to the copying and comparison of those state atoms.
 In the vast majority of cases, the states at two nearby program points is highly redundant and taking advantage of this redundancy can lead to consequent improvements in analysis performance. Exploiting this so-called \emph{spatial} sparsity of the state space is an important design point of our implementation.
 
-We use a sparse representation of state that accomodates any non-relational user-defined domain for forward analysis in a transparent manner.
+We use a sparse representation of state that accommodates any non-relational user-defined domain for forward analysis in a transparent manner.
 This representation \emph{does not} require use/def sites to be identified ahead of time and is hence suitable for other program quantities than variables.
 Although they do not detail their implementation, a very similar structure is described in an abstract setting in \cite{sparse-nr}.
 Furthermore, we present an extension of this idea to a relational domain, namely, the Static Shape Graph heap model as introduced in \cite{ssc}.
 
-There is another related kind of sparsity, that is sometimes called \emph{temporal}, where the analyzer benefits from knowledge of state dependencies to avoid recomputing transfer operators that only use unchanged subset of the state. It allows the interpreter to make results from computations flow directly into use sites. In the current implementation we do not use temporal sparsity, mainly due to a combination of time constraints and soundness concerns, although care was taken to ensure the feasability of this optimization in the future.
+There is another related kind of sparsity, that is sometimes called \emph{temporal}, where the analyzer benefits from knowledge of state dependencies to avoid recomputing transfer operators that only use unchanged subset of the state. It allows the interpreter to make results from computations flow directly into use sites. In the current implementation we do not use temporal sparsity, mainly due to a combination of time constraints and soundness concerns, although care was taken to ensure the feasibility of this optimization in the future.
 
 \subsection*{Non-relational}
 
@@ -440,7 +441,7 @@ We will focus here on exposing a way to implement a similar state domain with a 
 The main inspiration comes from \cite{ssa-alias} : they develop a sparse alias analysis for local variables that we use as a basis for our shape domain. The authors make the following observation.
 
 Assuming that the analyzed code is in SSA form, we can order the set of program variable under the domination relation of their definition.
-That being done, it is clear that when transfering the state over a non-dominating edge, we can trim all heap objects of variables whose definition stopped dominating the current control point. In fact, we can always remove any dead variables from our abstract heap, and non-dominating definitions are always dead thanks to the fundamental property of SSA.
+That being done, it is clear that when transferring the state over a non-dominating edge, we can trim all heap objects of variables whose definition stopped dominating the current control point. In fact, we can always remove any dead variables from our abstract heap, and non-dominating definitions are always dead thanks to the fundamental property of SSA.
 
 To be slightly more precise, here is a sketch of the transfer function for variable assignment and $\phi$ nodes with two predecessors.
 \[
@@ -461,17 +462,17 @@ where $\text{dom}(\tilde{x})$ is the set of variable having their definition in 
 As we alluded to in the previous section, one can look at the restriction to dominating definitions as a \emph{summarization} of the state between the $\phi$'s EBB head and its immediate dominator.
 
 From this formulation, we can deduce a sparse format for this simplified ``variable-only'' static shape graph : there is a consequent amount of sharing between subsequent states. In fact, we can see from the transfer functions that they only need to manipulate the ``most recently'' defined variables in each object.
-In \cite{ssa-alias}, this sharing is exploited by representing heap objects as sorted singly-linked list with hash-consing. The elimination of redundancy is thus implicitely handled by the datastructure.
+In \cite{ssa-alias}, this sharing is exploited by representing heap objects as sorted singly-linked list with hash-consing. The elimination of redundancy is thus implicitly handled by the data structure.
 
 It has the benefit of keeping the implementation close to the mathematical structure, but forces the algorithm to keep the linked list heads of \emph{all} live heap objects at all control points, defeating some of the sparsity.
-We take an alternate route of representing the tree explicitely with pointers in both directions. At the cost of additional lookups along its spine -- much like in the SSA case -- we can cut down the storage at each control point to the set of modified objects. Doing this, we also avoid the need for hash-consing.
+We take an alternate route of representing the tree explicitly with pointers in both directions. At the cost of additional lookups along its spine -- much like in the SSA case -- we can cut down the storage at each control point to the set of modified objects. Doing this, we also avoid the need for hash-consing.
 
 \paragraph{Alias tree} The encoding of variable aliasing takes the form of a forest of doubly-linked trees.
-Each node is labelled by a variable definition and several nodes can have the same label.
+Each node is labeled by a variable definition and several nodes can have the same label.
 This tree respects the dominance ordering of variable definitions.
-The information readily available from this structure is, given a variable $x$, the content of every heap object that $x$ refers to \emph{at the point it was defined}. Each path from a $x$-node to a root is such an object. The set of variable refering to that object is simply the set of labels encountered along the path.
+The information readily available from this structure is, given a variable $x$, the content of every heap object that $x$ refers to \emph{at the point it was defined}. Each path from a $x$-node to a root is such an object. The set of variable referring to that object is simply the set of labels encountered along the path.
 
-More work has to be done to compute the set of objects refering to $x$ at any point in the program using $x$ : it is the tradeoff we make to keep the storage per control point down.
+More work has to be done to compute the set of objects referring to $x$ at any point in the program using $x$ : it is the trade-off we make to keep the storage per control point down.
 Assuming that $x$ is a definition dominating $a$, the set of tree nodes being the heads of objects that $x$ refers to when the interpreter is at $a$ can be characterized. They are the end-points of paths in the alias tree that starts at an $x$-node and end in a dominating position over $a$.
 
 \begin{algorithm}
@@ -539,17 +540,17 @@ Assuming that $x$ is a definition dominating $a$, the set of tree nodes being th
 
 \paragraph{Generic sparsification} We hypothesize that a general transform from dense to sparse state structure underlies the particular one presented in this report and included in our implementation.
 Although we do not hope for a fully mechanized way to do such a conversion, it is likely that we could provide a set of generic reusable component to make the implementation as well as the soundness proof of those state domains easier.
-As more use cases appear we will try to develop a general framework, both theoritical and implementation-wise, for this process.
+As more use cases appear we will try to develop a general framework, both theoretical and implementation-wise, for this process.
 
 \paragraph{User provided optimizations} We briefly hinted at domain-specific optimizations in the introduction.
 Our long term plan is to provide hooks in the compiler and the analyzer to allow for user defined analysis and optimization.
 Moreover, those should be able to easily build upon the existing infrastructure.
 Although the abstract interpreter model is a good fit in that regard, we have not yet found a fully satisfactory equivalent for the optimization side.
 
-As a good example of the envisioned usefuleness of this kind of modularity, consider the developement of a high-level interface to a BLAS library.
-This was not choosen at random since the linear algebra routines are in fact a sizable chunk of the Julia standard library, and BLAS is used as their backend in the common case floating point numeric types.
+As a good example of the envisioned usefulness of this kind of modularity, consider the development of a high-level interface to a BLAS library.
+This was not chosen at random since the linear algebra routines are in fact a sizable chunk of the Julia standard library, and BLAS is used as their back end in the common case floating point numeric types.
 
-It is easy to use under a simple model where the output of the computation is freshly allocated memory containing the result. This avoids aliasing bugs, however it is inefficient because it does not take advantage of the specialized BLAS functions that can output the result in place. Reasonning that the two are equivalent if one of the argument (and all its aliases) are dead after the BLAS call is almost impossible to the compiler because it requires understanding of the routine, of which the core is often hand written assembly.
+It is easy to use under a simple model where the output of the computation is freshly allocated memory containing the result. This avoids aliasing bugs, however it is inefficient because it does not take advantage of the specialized BLAS functions that can output the result in place. Reasoning that the two are equivalent if one of the argument (and all its aliases) are dead after the BLAS call is almost impossible to the compiler because it requires understanding of the routine, of which the core is often hand written assembly.
 However, the rules of BLAS aliasing are very regular at a high level and someone writing a wrapper for the library could easily, given the right interface, integrate those rules directly as a compiler extension.
 
 As we work towards making the interpreter more accessible, the need for good tooling becomes unavoidable.
@@ -557,10 +558,10 @@ As we work towards making the interpreter more accessible, the need for good too
 \paragraph{Abstract debugging} We would like to provide a common infrastructure aimed at debugging abstract domains.
 In its simplest form, this system would open the possibility for a domain to provide small run-time guards checking that the state conforms to what was inferred.
 The analyzer would then, in ``verification'' mode, insert those guards in the code before running it, along with the necessary information to trace back the exact transfer function that computed an unsound result.
-This would obviously not replace a formal proof of soundness but would help weed out implementation errors by large scale testing on the consequent amonut of freely available julia source.
+This would obviously not replace a formal proof of soundness but would help weed out implementation errors by large scale testing on the consequent amount of freely available julia source.
 
 \paragraph{Visualization} As a way to help implementation work, a graphical visualization of the interpreter was hastily put together.
-The usefuleness of this tool exceeded our -- admitedly low -- expectations. [maybe screenshot in annex]
+The usefulness of this tool exceeded our -- admittedly low -- expectations. [maybe screenshot in annex]
 We believe that interactive feedback is a key aspect of allowing users with no particular background in program analysis to develop an understanding of the -- in fact quite natural -- underlying model.
 
 \newpage
