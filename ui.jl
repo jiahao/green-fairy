@@ -221,7 +221,7 @@ end
 
 function loc_name(loc)
     if loc.def.isphi
-        return "phi$(loc.def.pc)_$(loc.inc)ref$(loc.ref_idx)"
+        return "phi$(loc.def.pc)_ref$(loc.ref_idx)"
     else
         return "pc$(loc.def.pc)ref$(loc.ref_idx)"
     end
@@ -229,7 +229,6 @@ end
 
 function edge_to(io, loc1, loc2, bnd)
     if loc2.ref_idx != 0 && loc1 != loc2 && loc1.ref_idx != 0
-        @show loc1 loc2
         bend = string(",bend ", (bnd ? "left":"right"),"=3ex")
         println(io, "\\draw[->,thick,black", "] (", loc_name(loc1), ") edge (", loc_name(loc2), ");")
     end
@@ -274,16 +273,14 @@ function to_tikz(sched, fc)
             for (refi,ref) in enumerate(ls.heap[pc])
                 msg = ""
                 msg *= string(ref.gen)
-                push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(false,pc),0,refi),ref, msg))
+                push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(false,pc),refi),ref, msg))
             end
             if haskey(ls.phi_heap, pc)
-                for (inci,inc) in enumerate(ls.phi_heap[pc].refs)
-                    for (refi,ref) in enumerate(inc)
-                        msg = ""#string(inci, "/", ref, " ")
+                for (refi,ref) in enumerate(ls.phi_heap[pc].refs)
+                        msg = ""
                         msg *= string(ref.gen, ":")
-                        msg *= join(map(i->string(ls.local_names[i]), collect(ls.phi_heap[pc].defs[inci][refi])), ":")
-                        push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(true,pc),inci,refi), ref, msg))
-                    end
+                        msg *= join(map(i->string(ls.local_names[i]), collect(ls.phi_heap[pc].defs[refi])), ":")
+                        push!(locset, (GreenFairy.HeapLoc(GreenFairy.Def(true,pc),refi), ref, msg))
                 end
             end
             iov = IOBuffer()
@@ -301,7 +298,6 @@ function to_tikz(sched, fc)
                     println(io, "\\node[$col,draw$last_right] (", loc_name(thisloc), ") { ", str, " };")
                     last_right = ",right=5ex of $(loc_name(thisloc))"
                     edge_to(iov, thisloc, ref.loc, Bool(i))
-                    #               i = (i+1)%2
                 end
                 println(io, "\\end{tikzpicture}")
                 alloc_i == ncol || println(io, "&")
@@ -311,28 +307,9 @@ function to_tikz(sched, fc)
             println(io, "\\end{tikzpicture}")
         end
         println(io, "\\\\")
-#        println(io, "\\hline")
     end
     println(io, "\\end{tabular}")
     println(io, "\\end{document}")
-    #=
-    
-            \item $a = 0$ \tikz \coordinate (aaa);
-            \item $a = 0$ \tikz \coordinate (aaa2);
-            \item $a = 0$ \tikz \coordinate (aaa3);
-        \end{itemize}
-        \end{minipage}
-        \begin{minipage}{0.4łinewidth}
-            \begin{tikzpicture}
-                \node [draw] (bbb) {hello};
-                \node [draw,below=of bbb] (bbb2) {helloZZ};
-                %\path (1,1) coordinate (bbb);
-                \end{tikzpicture}
-            \end{minipage}
-            \begin{tikzpicture}[overlay]
-                \path[->,thick,black] (aaa) edge[bend left] (bbb);
-                \end{tikzpicture}
-    =#
     open(f -> print(f, takebuf_string(io)), "out.tex", "w")
     run(`pdflatex out.tex`)
 end

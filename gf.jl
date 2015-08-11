@@ -433,9 +433,9 @@ function Base.show(io::IO, d::Def)
 end
 immutable HeapLoc
     def :: Def # link to the alias tree
-    inc :: Int # if refers to a phi, the incoming branch, else 0
     ref_idx :: Int # or 0 if it is an allocation
 end
+
 # TODO this struct is used a lot
 # and could maybe benefit from tighter packing
 # e.g. age is small, inc is likely to also be
@@ -453,9 +453,6 @@ function Base.show(io::IO, loc::HeapLoc)
     else
         print(io, " ", loc.ref_idx)
     end
-    if loc.def.isphi
-        print(io, " inc:", loc.inc)
-    end
     print(io, ")")
 end
 
@@ -472,10 +469,11 @@ const MAX_GEN = 5
 const MAX_GEN_ALLOC = 5
 
 immutable PhiHeap
-    refs :: Vector{HeapRefs} # inc => refs
-    defs :: Vector{Vector{Set{Int}}} # inc => ref => {vars}
+    refs :: HeapRefs
+    defs :: Vector{Set{Int}} # ref => {vars}
+    incs :: Vector{Set{Int}} # ref => {incs}
 end
-PhiHeap() = PhiHeap(HeapRefs[],Array(Vector{Set{Int}},0))
+PhiHeap() = PhiHeap(HeapRef[],Array(Set{Int},0), Array(Set{Int},0))
 
 type LocalStore{V<:Lattice}
     local_names :: Vector{LocalName}
@@ -620,18 +618,15 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
     if !obj.isphi
         for i in eachindex(s.heap[obj.pc])
             ref = s.heap[obj.pc][i]
-            push!(new_heap, HeapRef(HeapLoc(obj,0,i),ref.gen,ref.alloc,ref.outside))
+            push!(new_heap, HeapRef(HeapLoc(obj,i),ref.gen,ref.alloc,ref.outside))
         end
     else
-        #println("D $pc $(s.local_names[li])")
         @assert(li > 0)
         phi_h = s.phi_heap[obj.pc]
-        for pred_i in eachindex(phi_h.refs)
-            for ref_i in eachindex(phi_h.refs[pred_i])
-                if li in phi_h.defs[pred_i][ref_i]
-                    ref = phi_h.refs[pred_i][ref_i]
-                    push!(new_heap, HeapRef(HeapLoc(obj,pred_i,ref_i),ref.gen,ref.alloc,ref.outside)) 
-                end
+        for ref_i in eachindex(phi_h.refs)
+            if li in phi_h.defs[ref_i]
+                ref = phi_h.refs[ref_i]
+                push!(new_heap, HeapRef(HeapLoc(obj,ref_i),ref.gen,ref.alloc,ref.outside)) 
             end
         end
     end
@@ -650,57 +645,34 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
             phi_heap = s.phi_heap[curpc]
             new_heap_replace = fill(0, length(new_heap))
             new_heap_dgen = fill(0, length(new_heap))
-            #println("phi for $(s.local_names[li]) : $phi_heap")
             new_heap_indices = eachindex(new_heap) # will be grown so hoist this
-            for inc in eachindex(phi_heap.refs)
-                inc_phi_heap = phi_heap.refs[inc]
-                # find the index of this inc in the predecessor list
-                phi_inc_idx = 0
-                #=                    if label > 0
-                phi_edges = s.defs[li].phi_edges[label]
-                inc_pred_pc = phi_edges[inc]
-                for k in eachindex(s.dtree.pred[label])
-                if s.dtree.pred[label][k][2] == inc_pred_pc
-                phi_inc_idx = k
-                end
-                end
-                end=#
-                #                println("doing $curpc/$inc $inc_phi_heap")
-                for i in eachindex(inc_phi_heap)
-                    cur_obj = inc_phi_heap[i]
-                    #idx = findfirst(new_heap, cur_obj)
-                    for idx in new_heap_indices
-                        new_heap_ref = new_heap[idx]
-                        if cur_obj == new_heap_ref
-                            push!(new_heap, HeapRef(HeapLoc(cur, inc, i), cur_obj.gen, cur_obj.alloc,cur_obj.outside))
-                            new_heap_replace[idx] += 1
-                        elseif obj.pc != curpc
-                            haskey(s.phi_heap_gen, curpc) || continue
-                            allocs_dgen = s.phi_heap_gen[curpc]
-                            haskey(allocs_dgen, new_heap_ref.alloc) || continue
-                            new_heap_dgen[idx] = max(new_heap_dgen[idx], get(allocs_dgen[new_heap_ref.alloc], i, 0))
-                        end
+            for i in eachindex(phi_heap.refs)
+                cur_obj = phi_heap.refs[i]
+                for idx in new_heap_indices
+                    new_heap_ref = new_heap[idx]
+                    if cur_obj == new_heap_ref
+                        push!(new_heap, HeapRef(HeapLoc(cur, i), cur_obj.gen, cur_obj.alloc,cur_obj.outside))
+                        new_heap_replace[idx] += length(phi_heap.incs[i])
+                    elseif obj.pc != curpc
+                        haskey(s.phi_heap_gen, curpc) || continue
+                        allocs_dgen = s.phi_heap_gen[curpc]
+                        haskey(allocs_dgen, new_heap_ref.alloc) || continue
+                        new_heap_dgen[idx] = max(new_heap_dgen[idx], get(allocs_dgen[new_heap_ref.alloc], i, 0))
                     end
                 end
             end
-            n_inc = length(phi_heap.refs)
+            n_inc = phi_n_live(s, curpc)
             @assert(n_inc > 0)
             n_del = 0
             for i in eachindex(new_heap_replace)
                 if new_heap_replace[i] == n_inc
-                    @assert(new_heap_dgen[i] == 0)
+                    #@assert(new_heap_dgen[i] == 0) # TODO not really sure about that, needs thinking
                     new_heap[i] = new_heap[end-n_del]
                     n_del += 1
-                else
-                    new_heap[i] = birthday(new_heap[i], new_heap_dgen[i] == MAX_GEN_ALLOC ? MAX_GEN : new_heap_dgen[i])
                 end
+                new_heap[i] = birthday(new_heap[i], new_heap_dgen[i] == MAX_GEN_ALLOC ? MAX_GEN : new_heap_dgen[i])
             end
             resize!(new_heap, length(new_heap) - n_del)
-            #=if curpc == 0
-                curpc += 1
-            else
-                pcur += 1
-            end=#
         end
         if curpc != obj.pc
             cur = Def(false, curpc)
@@ -710,12 +682,8 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
                 for idx in eachindex(new_heap)
                     new_heap_ref = new_heap[idx]
                     if new_heap_ref == cur_obj
-                        new_heap[idx] = HeapRef(HeapLoc(cur, 0, i), cur_obj.gen, cur_obj.alloc, cur_obj.outside)
+                        new_heap[idx] = HeapRef(HeapLoc(cur, i), cur_obj.gen, cur_obj.alloc, cur_obj.outside)
                     elseif new_heap_ref.alloc == curpc
-                        if debug
-                            println("Birthday for $pc at $curpc")
-                            println("\t$new_heap_ref")
-                        end
                         new_heap[idx] = birthday(new_heap[idx], 1)
                     end
                 end
@@ -744,23 +712,19 @@ function restrict_heap_ref(s, h, pc)
     gen = h.gen
     @assert pcdepth >= 0
     while true
-        #        @show h
         hlabel = find_label(s.code, h.loc.def.pc)
         hdepth = dom_depth(s.dtree, hlabel)
         @assert hdepth >= 0
         if h.loc.ref_idx == 0 || hdepth < pcdepth || hdepth == pcdepth && h.loc.def.pc <= pc
             if h.loc.ref_idx == 0
-                #println("Promote by restrict : $(gen-h.gen) $h")
                 h = birthday(h, gen-h.gen)
             end
             return h
         end
-        #        @show hdef h pc
-        #@show hinc hid
         if !h.loc.def.isphi
             h = s.heap[h.loc.def.pc][h.loc.ref_idx]
         else
-            h = s.phi_heap[h.loc.def.pc].refs[h.loc.inc][h.loc.ref_idx]
+            h = s.phi_heap[h.loc.def.pc].refs[h.loc.ref_idx]
         end
     end
 end
@@ -786,6 +750,14 @@ function heap_loc_getfield!(s::LocalStore,loc::HeapLoc,field::Int,result::Vector
     true
 end
 
+function phi_n_live(s::LocalStore, pc::Int)
+    lbl = findfirst(s.code.label_pc, pc)
+    if lbl > 0
+        return countnz(s.phis_live[lbl])
+    else
+        return 1
+    end
+end
 
 function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
     @assert pc > 0
@@ -899,11 +871,6 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         #println("Updating ϕ $k at $pc : ", s.defs[li].phis[lbl])
         for (i,pred_edge) in enumerate(s.dtree.pred[lbl])
             pred = pred_edge[2]
-            if length(phi_heap.refs) < i
-                @assert length(phi_heap.refs) == i-1
-                push!(phi_heap.refs, Array(HeapRef,0))
-                push!(phi_heap.defs, Array(Set{Int},0))
-            end
             s.phis_live[lbl][i] || continue
 
             # restricted => actual => locals
@@ -932,18 +899,21 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                 @show summarized
             end
             # commit the changes
-            for (ref_i, ref) in enumerate(phi_heap.refs[i])
+            for (ref_i, ref) in enumerate(phi_heap.refs)
                 if haskey(summarized, ref.loc)
                     names_set = summarized[ref.loc]
                     for (other_ref, locals) in names_set
-                        if locals == phi_heap.defs[i][ref_i]
+                        if locals == phi_heap.defs[ref_i]
                             pop!(names_set, (other_ref,locals))
                             joined_ref = join(other_ref, ref)
                             if ref != joined_ref
-                                phi_heap.refs[i][ref_i] = joined_ref
+                                phi_heap.refs[ref_i] = joined_ref
                                 chgd = true
                             end
-                            #println("DEL $ref $actual")
+                            if !(i in phi_heap.incs[ref_i])
+                                push!(phi_heap.incs[ref_i], i)
+                                chgd = true
+                            end
                         end
                     end
                 end
@@ -951,8 +921,9 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
 
             for (refloc,locals) in summarized
                 for (ref,names) in locals
-                    push!(phi_heap.refs[i], ref)
-                    push!(phi_heap.defs[i], names)
+                    push!(phi_heap.refs, ref)
+                    push!(phi_heap.defs, names)
+                    push!(phi_heap.incs, Set{Int}([i]))
                     chgd = true
                 end
             end
@@ -969,7 +940,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
 
     # heap
     if :new in sd.heap_use
-        ref = HeapRef(HeapLoc(Def(false,pc),0,0),0,pc,false)
+        ref = HeapRef(HeapLoc(Def(false,pc),0),0,pc,false)
         @show ref
         if !(ref in s.heap[pc])
             push!(s.heap[pc], ref)
@@ -981,7 +952,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         filter!(t -> t !== :new, sd.heap_use)
     end
     for obj in sd.heap_use
-        if isa(obj, Tuple) # getfield
+        #=if isa(obj, Tuple) # getfield
             parent,field = obj
             @assert(field > 0) # TODO unknown fields
             parent_heap = Array(HeapRef, 0)
@@ -990,8 +961,6 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
 
             phi_h = get!(s.phi_heap, pc) do
                 ph = PhiHeap()
-                push!(ph.refs, Array(HeapRef,0))
-                push!(ph.defs, Array(Set{Int},0))
                 ph
             end
             
@@ -1000,11 +969,11 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                 @show field_targets
                 empty!(field_targets)
             end
-        else
+        else=#
             chgd |= propagate_heap!(s, obj, pc, s.heap[pc], true)
-        end
+    #end
     end
-
+    #=
     # heap setfield
     for (parent,field,child) in sd.heap_setfield
         @assert(field > 0) # TODO unknown fields
@@ -1016,8 +985,6 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
 
         phi_h = get!(s.phi_heap, pc) do
             ph = PhiHeap()
-            push!(ph.refs, Array(HeapRef,0))
-            push!(ph.defs, Array(Set{Int},0))
             ph
         end
         
@@ -1034,7 +1001,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                 push!(fields[field], child_ref.loc)
             end
         end
-    end
+    end=#
 
     # single assignment value
     sa = sd.sa_name
@@ -1137,7 +1104,6 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
     args_li = is.heap_li
     k = 1
     initial_phi_heap = PhiHeap()
-    push!(initial_phi_heap.refs, Array(HeapRef,0))
     for i = 1:length(is.args)
         li = add_local!(ls, code.args[i])
         args_li[k] = li
@@ -1146,8 +1112,9 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         heap = is.heap[k]
         for init_ref in heap
             arg_i, ref_i = init_ref
-            push!(initial_phi_heap.refs[1], HeapRef(HeapLoc(Def(true, 0), 1, ref_i), 0, 0, false))
-            push!(initial_phi_heap.defs[1], Set{Int}([arg_li[arg_i]]))
+            push!(initial_phi_heap.refs, HeapRef(HeapLoc(Def(true, 0), ref_i), 0, 0, false))
+            push!(initial_phi_heap.defs, Set{Int}([arg_li[arg_i]]))
+            push!(initial_phi_heap.incs, Set{Int}())
         end
         
         k+=1
@@ -1160,8 +1127,9 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         heap = is.heap[k]
         for init_ref in heap
             arg_i, ref_i = init_ref
-            push!(initial_phi_heap.refs[1], HeapRef(HeapLoc(Def(true, 0), 1, ref_i), 0, 0, false))
-            push!(initial_phi_heap.defs[1], Set{Int}([arg_li[arg_i]]))
+            push!(initial_phi_heap.refs, HeapRef(HeapLoc(Def(true, 0), ref_i), 0, 0, false))
+            push!(initial_phi_heap.defs, Set{Int}([arg_li[arg_i]]))
+            push!(initial_phi_heap.incs, Set{Int}())
         end
         k+=1
     end
@@ -1173,8 +1141,9 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         heap = is.heap[k]
         for init_ref in heap
             arg_i, ref_i = init_ref
-            push!(initial_phi_heap.refs[1], HeapRef(HeapLoc(Def(true, 0), 1, ref_i), 0, 0, false))
-            push!(initial_phi_heap.defs[1], Set{Int}([arg_li[arg_i]]))
+            push!(initial_phi_heap.refs, HeapRef(HeapLoc(Def(true, 0), ref_i), 0, 0, false))
+            push!(initial_phi_heap.defs, Set{Int}([arg_li[arg_i]]))
+            push!(initial_phi_heap.incs, Set{Int}())
         end
         k+=1
     end
@@ -1277,7 +1246,7 @@ function propagate!(s::State,fs::FinalState,fc::Int,pc::Int,sd)
                             break
                         end
                     end
-                    ref = ls.phi_heap[ref.loc.def.pc].refs[ref.loc.inc][ref.loc.ref_idx]
+                    ref = ls.phi_heap[ref.loc.def.pc].refs[ref.loc.ref_idx]
                 end
             end
         end
@@ -2544,13 +2513,12 @@ const _staged_cache = ObjectIdDict()#Dict{Any,Any}()
 function accumulate_heap!(ls, href, into)
     def = href.loc.def
     refi = href.loc.ref_idx
-    inc = href.loc.inc
     push!(into, href.loc)
     if refi == 0
         return
     end
     if def.isphi
-        nr = ls.phi_heap[def.pc].refs[inc][refi]
+        nr = ls.phi_heap[def.pc].refs[refi]
     else
         nr = ls.heap[def.pc][refi]
     end
@@ -2564,12 +2532,11 @@ function materialize_heap(ls, pc)
     while pc > 0
         if haskey(ls.phi_heap, pc)
             phi_h = ls.phi_heap[pc]
-            for (phi_inci, phi_inc) in enumerate(phi_h.refs)
-                for (refi, phi_ref) in enumerate(phi_inc)
+            for (refi, phi_ref) in enumerate(phi_h.refs)
                     found = false
                     for obj in objects
                         for ref in obj
-                            if ref.loc.def.isphi && ref.loc.def.pc == pc && ref.loc.inc == phi_inci && ref.loc.ref_idx == refi
+                            if ref.loc.def.isphi && ref.loc.def.pc == pc && ref.loc.ref_idx == refi
                                 push!(obj, phi_ref)
                                 found = true
                                 break
@@ -2580,7 +2547,6 @@ function materialize_heap(ls, pc)
                         push!(objects, Set{Any}(HeapRef[phi_ref]))
                     end
                 end
-            end
         end
         sa_ref = ls.heap[pc]
         for (sa_refi, sa_ref) in enumerate(ls.heap[pc])
