@@ -99,7 +99,9 @@ We hope to integrate our work into the main compiler in the coming year.
 
 Besides tying up the various technical loose ends and improving the non-algorithmic bottlenecks of the implementation, we have several goals for the future of this project.
 
-A consequent amount of technical work has to be done to make the later stages of the compiler modular enough that the friction in taking advantage of new information from the analysis becomes much lower \todo{Wordy}. In particular, we plan to implement optimizations using the shape analysis to provide precise no-escape information that will allow memory reuse and stack allocation, greatly reducing the load on the garbage collector and the dynamic allocator.
+A consequent amount of technical work has to be done to make the later stages of the compiler more modular.
+Today, there is no straightforward way of taking advantage of new static information.
+In particular, we plan to implement optimizations using the shape analysis to provide precise no-escape information that will allow memory reuse and stack allocation, greatly reducing the load on the garbage collector and the dynamic allocator.
 
 In the longer term, the natural extension to this work is to devise an intuitive interface that makes it possible for users to extend the abstract state of the interpreter with domain-specific informations. We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use. \todo[inline]{What optimizations do you think belong in this class?}
 
@@ -267,7 +269,7 @@ end
 
 This domain is parametric over any ordered numeric types having an upper and lower bound. Defining a method for \verb~isbot~ is necessary since there are multiple representation of $\bot$.
 
-The \verb~meet_ext~ function is the product domain reduction function. In that case we express that the knowledge that a value is constant can reduce an interval to a single point or $\bot$ depending on the particular value. We are free to add other method definitions to this function to increase precision using information from other domains than \verb~Const~. This modelization of the reduced product relies on multiple dispatch to easily provide extension points : the user can seamlessly provide reduction functions for any pair of domains, possibly defined by someone else.
+The \verb~meet_ext~ function is the product domain reduction function. In that case we express that the knowledge that a value is constant can reduce an interval to a single point or $\bot$ depending on the particular value. We are free to add other method definitions to this function to increase precision using information from other domains than \verb~Const~. This modelization of the reduced product relies on multiple dispatch to easily provide extension points: the user can seamlessly provide reduction functions for any pair of domains, possibly defined by someone else.
 %\todo[inline]{From this description, here sounds like a good place to mention that meet\_ext is a generic function and can be extended with multimethods without the need to give the new definitions new names. And it's worth saying why the multimethod approach is more elegant here, after putting this entire section after the one about Julia semantics.}
 
 Describing transfer functions is also straightforward, as demonstrated by this simple example implementing the transfer for the addition on the interval lattice:
@@ -286,7 +288,55 @@ end
 We can see that the arguments can be provided in different domain than that of intervals, requiring a \verb~convert~ call. This gives access to the full product to a transfer function, making it possible to use information from other domains in the computation.
 %\todo[inline]{Is eval\_call a transfer function? It is unclear from the description. This paragraph describing the code is not a good place to mention generalities about what transfer functions can do. What is this specific transfer function doing that illustrates the general principle?}
 
-Due to space constraints, we relegate to the appendix another example that demonstrates the construction of a \emph{finite disjunction} domain that is parametric over any other domain and can thus serve as a composable building block. It can be used to enhance precision while keeping the implementation simple and decoupled.
+
+We give another example that demonstrates the construction of a \emph{finite disjunction} domain that is parametric over any other domain and can thus serve as a composable building block. It can be used to enhance precision while keeping the implementation simple and decoupled. The implementation shown here is very naive: the widening does $O(n^3)$ comparisons and transfer is exponential in the number of arguments. Nonetheless, nothing prevents swapping this implementation for a more efficient one while keeping the genericity of the interface and its independence over the underlying domain.
+
+\begin{lstlisting}[language=julia]
+immutable FiniteSum{T <: Lattice,n}
+    values :: NTuple{n,T}
+end
+top{T,n}(::Type{FiniteSum{T,n}}) = FiniteSum(ntuple(i->top(T),n))
+istop(v::FiniteSum) = any(istop, v.values)
+bot{T,n}(::Type{FiniteSum{T,n}}) = FiniteSum(ntuple(i->bot(T),n))
+isbot(v::FiniteSum) = all(isbot, v.values)
+<={T,n}(v1::FiniteSum{T,n}, v2::FiniteSum{T,n}) =
+     all(a -> exists(b -> a <= b, v2.values), v1.values)
+
+# other domains can opt-in to provide more precise costs
+join_cost(v1,v2) = v1 <= v2 ? 0.0 : v2 <= v1 ? 0.0 : 1.0
+function FiniteSum{T,n}(values::Vector{T})
+    while length(values) > n
+        costs = [join_cost(a,b) for a in values, b in values]
+        idx_a, idx_b = ind2sub(costs, indmin(costs))
+        push!(values, join(values[idx_a], values[idx_b]))
+        deleteat!(values, idx_a, idx_b)
+    end
+    FiniteSum{T,n}(tuple(values...))
+end
+join{T,n}(v1::FiniteSum{T,n},v2::FiniteSum{T,n}) =
+    FiniteSum{T,n}([v1.values..., v2.values...])
+\end{lstlisting}
+
+We can then define generic transfer and reduction functions that delegates the computation.
+
+\begin{lstlisting}[language=julia]
+function eval_call{T,n,V}(::Type{FiniteSum{T,n}}, f::V, args::Vector{V})
+    args = [convert(FiniteSum{T,n},args[i]).values[j] for i in eachindex(args), j=1:n]
+    eval_with(acc, i) =
+        i > length(args) ? eval_call(T,f,acc) :
+            reduce(vcat, [eval_with([acc..., args[i,j]],i+1) for j=1:n])
+    FiniteSum(eval_with([],1))
+end
+meet_ext{T,n}(v1::FiniteSum{T,n}, v2::Lattice) =
+    FiniteSum(map(v -> meet_ext(v, v2), v1.values))
+meet_ext{T,n}(v1::FiniteSum{T,n}, v2::FiniteSum{T,n}) =
+    FiniteSum(map(v -> meet_ext(v, v2), v1.values))
+meet_ext{T,n}(v1::Lattice, v2::FiniteSum{T,n}) =
+    reduce(join, map(v -> meet_ext(v1, v), v2.values))
+\end{lstlisting}
+
+Here, we show that this finite disjunction can specify the reduced product reduction for both $T_1\times\left(T_2\sqcup\dots\sqcup T_2\right)\to T_1$ and $\left(T_2\sqcup\dots\sqcup T_2\right)\times T_1 \to T_2\sqcup\dots\sqcup T_2$ with no particular knowledge of $T_1$ or $T_2$.
+
 Those two examples illustrate the benefits of the pervasive use of ad-hoc polymorphism and multiple dispatch in Julia: it allows for the construction of reusable abstractions.
 
 Several important opt-in features for value domains and their transfer functions were not described here for the sake of brevity. This includes fused join-comparisons, widening, participation in the dispatch machinery, the ability to control the propagation of values over function call boundaries, as well as state-altering actions such as exception raising or heap operations.
@@ -312,7 +362,7 @@ We will leave out some of those features because while they require additional w
 Generic functions have interesting repercussions on analysis strategies. Since virtually every function call is indirect, not knowing the argument types can lead to a combinatorial blowup of code to explore in an interprocedural analysis, leading to widening and more precision loss. It is therefore often worth to trade performance for precision as long as it can keep types fully known\cite{jeff-phd}.
 
 \section*{Analysis sparsity}
-%\todo[inline]{I find this section very heavy and hard to read. There are a lot of details without much context of why I should care about the details. Could use some examples of the types of sparsity and how you can compress the analysis by taking advantage of sparsity.}
+
 The Green Fairy is oriented towards building flow-sensitive analysis, that is, it provides information dependent on the program point.
 The advantage of flow sensitivity is in the precision gain, although it comes with a performance price compared to the more approximative flow-insensitive analysis.
 There are different techniques to lower the cost of flow sensitivity.
@@ -395,7 +445,7 @@ Essentially, we are providing a generic sparse map implementation from an arbitr
 It can be used to represent any non-relational internal interpreter state of the user's choice.
 
 It is hence inefficient in our case to maintain the renaming property. Instead, when encountering an use, the interpreter walks the dominator tree upward to find the nearest definition.
-This lookup is done following the tree spine, giving it an $O(\text{dominator tree depth})$ worst case complexity. In practice, the dominator tree is shallow and wide : in the Julia standard library (around 4MB of sources) the deepest dominator tree is of depth [?].
+This lookup is done following the tree spine, giving it an $O(\text{dominator tree depth})$ worst case complexity. In practice, the dominator tree is shallow and wide.
 
 As for the implementation, we do not materialize $\phi$ instructions: they are kept out of band as a single compound summary information for each EBB head.
 They can be efficiently dynamically updated when required by the discovery of new definitions.
@@ -417,7 +467,11 @@ This structure cannot be readily used for relational domains, however we can ext
 
 \section*{Shape analysis}
 
-[todo some platitudes about shape analysis]
+It should be noted that, compared to the state of the art in shape analysis, especially in safety analysis, what we implement and present here is much less precise.
+In particular, the interprocedural component is its weaker part since it is not context sensitive.
+We are however seeing promising performance results and are hopeful that we can include this analysis as part of a production compiler, which is not typically possible with more precise shape analysis.
+
+We are also more interested in bounded heap structures and local invariants for optimization, whereas typical shape analysis try to infer global facts on unbounded data structures. In other words, we aim to fill the need for more precise escaping and aliasing information in an optimizing compiler, rather than match competitive shape analysis.
 
 \subsection*{Local variables}
 For a moment, we will ignore object fields and summary objects to concentrate on variable aliasing and its sparse structure. We will introduce those back later.
@@ -532,7 +586,7 @@ We can see from this description that additional work is needed to materialize t
 \EndFunction
 \end{algorithmic}
 \end{multicols}
-\caption{High level description of some transfer functions for sparse variable alias analysis}
+\caption*{High level $T[x=y]$ and $T[\phi]$ for sparse variable alias analysis on the alias tree}
 \end{algorithm}
 
 \subsection*{Generation liveness}
@@ -547,13 +601,13 @@ while ?
 end
 \end{lstlisting}
 We can take advantage of this information to allocate 3 memory cells and reuse them in a round robin fashion, instead of relying on the garbage collector at runtime.
+This optimization improves performance by removing GC overhead, amortizing allocation costs, and improving cache behavior.
 
 To compute this information, we add to each heap object a ``generation number'' that represents the maximum number of younger and live objects from the same allocation site. This counter lives in the lattice $\left\{0, \leq 1, \leq 2, \dots, \leq \infty \right\}$ with widening to avoid infinite increasing chains.
 When an alias tree edge crosses its own allocation site, this counter is increased.
 
 In order to preserve the property that the heap can always be materialized by looking up the dominator tree, we also compute a generation delta between an EBB's head and its immediate dominator for each allocation site.
 We apply this delta when we restrict alias edges across dominating control edges.
-%Keeping such a fine grained distinction between objects requires 
 
 \begin{figure}
 
@@ -578,8 +632,6 @@ On the leftmost column is a simple loop allocating one new object per iteration 
 
 On the right are the two alias trees corresponding to the two allocation sites. They are automatically generated from our analysis results. The numbers labeling each node are generation numbers. Nodes with explicit variable names are part of an EBB's head summary (our ``$\phi$'' nodes).
 \end{figure}
-
-
 
 \subsection*{Object fields}
 
@@ -718,6 +770,8 @@ N(x,f) = \left\{ \dest(e) ~\middle|~ e \in E(x,f) \right\} \\
 The first graph shows the general case. The second is an example demonstrating incompatible nodes.
 \end{figure}
 
+If there is an $f$-edge from $x$ to some summary node, then $T[y=x.f]$ does a split where the duplicate node is a normal node containing only $y$.
+This way, we keep only memory not referenced by the stack summarized.
 
 \paragraph{Implementation} Object fields are additional edges in the alias tree, labelled with a field index.
 Given an initial segment $x_1\dots x_n$ of the forest, we define the possible values of its $k$th field to be the set of destination of $k$-edges originating at $x_p$ where $p$ is the largest index such that $x_p$ has at least one $k$-edge.
@@ -734,9 +788,9 @@ The most straightforward way of introducing context sensitivity is through \emph
 Although it has been demonstrated that heap cloning can scale very well\cite{heapclone}, this result is only in the context of a flow-insensitive analysis.
 
 We make the choice not to introduce any context sensitive information while computing the fixpoint of the abstract heap over a function.
-In the setting we described until now, we would have to treat function arguments -- and objects reachable from them -- conservatively as a single summary node.
+In the situation we presented until now, we would have to treat function arguments -- and objects reachable from them -- conservatively as a single summary node.
 We instead introduce a new type of node that tries to keep more information by being less pessimistic about aliasing.
-Of course, inside the callee, we still can't answer the question whether those outside objects alias or not.
+Of course, inside the callee, we still can't answer the question whether those outside objects alias each other or not.
 However, by keeping them separated we allow the caller to regain some information by eliminating impossible nodes and perform a form of ``post-facto context sensitivity'' using call site information.
 
 This new type of node, that we will call \emph{context} nodes, do not have the guarantee not to alias each other.
@@ -823,7 +877,17 @@ They are weaker than local nodes in the two following ways:
 
 The only change we need to make to $T[y=x.f]$ when $x$ is part of a $\gamma$ node is that we have to keep edges between $\gamma x\dots$ and the dangling nodes $\tilde{v}_i$ introduced.
 
-Checking 
+\todo[inline]{proof scheme}
+
+\paragraph{Interprocedural analysis}
+To make the analysis interprocedural, we add a tree of $\gamma$ nodes starting at the function arguments, labeled by \emph{ghost} fields.
+Those record the shape of the heap before the execution of the function.
+When it's done, the caller matches its pre-call heap with ghost fields of the resulting callee heap.
+It then proceeds in a number of contractions to make the shape of the ghost heap match the caller shape.
+Finally, we apply field mutations to the matched nodes, either weakly or strongly depending on if the match is exact (single node) or not.
+
+Any technique that reduces the number of node in the matched graph improves precision.
+For example, if a variable appears only once in the graph, every edge having the node as destination must be the only concrete edge and competitive ones can be removed.
 
 
 \section*{I can see the future}
@@ -840,9 +904,9 @@ Moreover, those should be able to easily build upon the existing infrastructure.
 Although the abstract interpreter model is a good fit in that regard, we have not yet found a fully satisfactory equivalent for the optimization side.
 
 As a good example of the envisioned usefulness of this kind of modularity, consider the development of a high-level interface to a BLAS library.
-This was not chosen at random since the linear algebra routines are in fact a sizable chunk of the Julia standard library, and BLAS is used as their back end in the common case floating point numeric types.
+This example is particularly relevant since the linear algebra routines are in fact a sizable chunk of the Julia standard library. BLAS is used as their back end in the common case floating point numeric types.
 
-It is easy to use under a simple model where the output of the computation is freshly allocated memory containing the result. This avoids aliasing bugs, however it is inefficient because it does not take advantage of the specialized BLAS functions that can output the result in place. Reasoning that the two are equivalent if one of the argument (and all its aliases) are dead after the BLAS call is almost impossible to the compiler because it requires understanding of the routine, of which the core is often hand written assembly.
+BLAS is easy to use under a simple model where the output of the routines is freshly allocated memory containing the result. This avoids aliasing bugs, however it is inefficient because it does not take advantage of the specialized BLAS functions that can output the result in place, reusing the memory of an argument. Reasoning that the two are equivalent if one of the argument (and all its aliases) are dead after the BLAS call is almost impossible to the compiler because it requires understanding of the routine, of which the core is often hand written assembly.
 However, the rules of BLAS aliasing are very regular at a high level and someone writing a wrapper for the library could easily, given the right interface, integrate those rules directly as a compiler extension.
 
 As we work towards making the interpreter more accessible, the need for good tooling becomes unavoidable.
