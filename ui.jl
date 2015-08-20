@@ -81,12 +81,12 @@ function with_ssa(c, tree)
         end
         for (lbl,incs) in ds.phis
             pc = c.s.funs[c.fc].label_pc[lbl]
-            hp = ls.phi_heap[i]
+            #=hp = ls.phi_heap[i]
             hps = ""
             if haskey(hp, pc)
                 hps = " = " * join([heapstring(inc) for inc in hp[pc]], ", ")
-            end
-            ssa_info[pc] = push(get(ssa_info, pc, PersistentVector{Node}()), Elem(:li,[Elem(:span, "ϕ", style = Dict(:color => :red, :fontWeight => :bold)), Elem(:span, "($lname: $incs)", style = Dict(:fontWeight => :bold)), Elem(:span, " = $(GreenFairy.eval_def(ls,i,pc))$hps")]))
+            end=#
+            ssa_info[pc] = push(get(ssa_info, pc, PersistentVector{Node}()), Elem(:li,[Elem(:span, "ϕ", style = Dict(:color => :red, :fontWeight => :bold)), Elem(:span, "($lname: $incs)", style = Dict(:fontWeight => :bold)), Elem(:span, " = $(GreenFairy.eval_def(ls,i,pc))")]))
         end
     end
     for (pc,v) in ssa_info

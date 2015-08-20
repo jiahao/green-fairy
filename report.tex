@@ -251,7 +251,7 @@ We will give here a simplified description of this internal representation.
 A function is a control graph composed of extended basic blocks (EBB). Their defining property is to have a single control flow entry point as their head. Each one contains a linear succession of branches and variable assignments to literals and function calls.
 
 Some function calls have built-in semantic. We will mostly discuss \verb~setfield!(x,f,y)~ and \verb~getfield(x,f)~, noted respectively $x.f=y$ and $x.f$.
-As their name indicate they describe field access and mutation on Julia object.
+As their name indicate they describe field access and mutation on Julia objects.
 
 Our implementation deals with most of the current Julia semantic.
 We will leave out some of those features because while they require additional work, they are not directly relevant to this report. This includes
@@ -259,6 +259,7 @@ We will leave out some of those features because while they require additional w
 \item Exception handling. Even though special care was taken to handle it with complete precision (assuming of course precise throw-site information).
 \item Closure capture.
 \item Function calls with variable number of arguments, or ``splatting''.
+\item Arrays of references. We treat them as an object with a single weakly updated field.
 \end{itemize}
 
 \section*{Analysis sparsity}
@@ -359,12 +360,14 @@ It is not a worst-case improvement but a welcomed average constant factor gain.
 %Another advantage of EBBs is that the dynamic addition of outbound control flow edges does not require node splitting. It is the case of exception throwing : it would degrade the sparsity of the CFG to conservatively assume that any statement can throw. Our interpreter generates new edges when a transfer function detects a possible raise.
 
 \subsection*{Relational}
+Although \cite{sparse-nr} discusses relational domains, it only describes a solution for packed variable domains.
+It is precisely the class of relational domains that can be reframed as non-relational over a different set of names.
+The sparse map discussed in the previous section can be used as a basis to implement packed relational analysis.
 
-This structure cannot be readily used for relational domains, however we can extract an important insight from the non-relational case. We can think of the $\phi$ node living at an EBB's head as a summary of the state difference on any path between its immediate dominator and itself. It is less apparent in the case of a non-relational domain, since this difference is usually represented as an element of the domain itself, i.e., a small name-value mapping that only refers to changed names.
+This structure cannot be readily used for general relational domains, however we can extract an important insight from the non-relational case. We can think of the $\phi$ node living at an EBB's head as a summary of the state difference on any path between its immediate dominator and itself. It is less apparent in the case of a non-relational domain, since this difference is usually represented as an element of the domain itself, i.e., a small name-value mapping that only refers to changed names.
 
-Although \cite{sparse-nr} handles a class 
+
 [good example + explanation of a generic translation]
-[trash a bit \cite{sparse-nr} for saying relational in their title and only handling packed domains]
 
 \section*{Shape analysis}
 
@@ -430,7 +433,7 @@ An initial segment $x_1\dots x_n$ of this forest represents the heap object $\le
 Given a program point $a$ and a variable definition $x$ dominating $a$, we can characterize all heap objects $x$ points to when the interpreter is at $a$. They are initial segments of the forest, they contain $x$, all their elements dominate $a$ and they are maximal for those properties.
 
 We can see from this description that additional work is needed to materialize the point-to set of a definition $x$ at a control point further away from the definition point.
-\begin{algorithm}[H]
+\begin{algorithm}
 \footnotesize
 \setlength\columnsep{-1pt}
 \begin{multicols}{2}
@@ -562,7 +565,7 @@ We will say that $H\leq H'$ iff $H$ can be obtained from $H'$ by a succession of
 \item Demote a summary node to a normal node
 \end{itemize}
 
-\begin{figure}
+\begin{figure}[htdp]
 \centering
 \begin{tikzpicture}
 \node (sum) {$\star$};
@@ -741,10 +744,16 @@ However, it allows us to analyze every function independently of its call site.
 Moreover, it keeps strong precision for functions that access a statically bounded portion of the heap and do not mutate caller objects.
 For mutating functions, this model is still able to recover context information in simple cases.
 
+It might be worth exploring demand driven techniques that fall back to limited forms of heap cloning when they detect catastrophic precision losses.
+We don't have enough experience exercising our model to come up with a good set of heuristics yet.
+Especially since it depends on what type of optimization are clients to the analysis.
+
+\clearpage
+
 \section*{Future work}
 
 The current implementation of the Green Fairy is still a prototype in many regards.
-We will discuss longer term goals and projects here, keeping in mind that the immediate goal is to test and improve the library to reach a reasonable confidence of soundness on any Julia program.
+We will discuss longer term objectives and projects here, keeping in mind that the immediate goal is to test and improve the library to reach a reasonable confidence of soundness on any Julia program.
 
 \paragraph{Backward analysis}
 Our implementation only provides facilities for forward analysis.
@@ -779,12 +788,15 @@ In its simplest form, this system would open the possibility for a domain to pro
 The analyzer would then, in ``verification'' mode, insert those guards in the code before running it, along with the necessary information to trace back the exact transfer function that computed an unsound result.
 This would obviously not replace a formal proof of soundness but would help weed out implementation errors by large scale testing on the consequent amount of freely available Julia source.
 
-\paragraph{Visualization} As a way to help implementation work, a graphical visualization of the interpreter was hastily put together.
-The usefulness of this tool exceeded our -- admittedly low -- expectations. [maybe screenshot in annex]
+\paragraph{Visualization}
+As a way to help implementation work, a graphical visualization of the interpreter was hastily put together using the \verb~Escher.jl~ library\cite{escher}.
+The usefulness of this tool exceeded our -- admittedly low -- expectations. A screen capture is provided in the appendix.
 We believe that interactive feedback is a key aspect of allowing users with no particular background in program analysis to develop an understanding of the -- in fact quite natural -- underlying model.
+It would be interesting to explore the design space of such tools.
 
 \newpage
 \begin{thebibliography}{9}
+\small
 \bibitem[CC77]{absint-cousot} Patrick Cousot, Radhia Cousot -- \emph{Abstract interpretation: a unified lattice model for static analysis of programs by construction or approximation of fixpoints} (SIGPLAN 1977)
 \bibitem[BAP86]{cl} Brooks, Rodney A., David B. Posner, James L. McDonald, Jon L. White, Eric Benson, and Richard P. Gabriel -- \emph{Design of an optimizing, dynamically retargetable compiler for common Lisp} (ACM 1986)
 \bibitem[WZ91]{sparsecp} Mark N. Wegman, F. Kenneth Zadeck -- \emph{Constant propagation with conditional branches} (TOPLAS 1991)
@@ -799,10 +811,18 @@ We believe that interactive feedback is a key aspect of allowing users with no p
 \bibitem[BEK14]{julia-paper} Jeff Bezanson, Alan Edelman, Stefan Karpinski, Viral B. Shah -- \emph{Julia: A fresh approach to numerical computing} (2014) \verb~arXiv:1411.1607~
 \bibitem[Bez15]{jeff-phd} Jeff Bezanson -- \emph{Abstraction in Technical Computing} (PhD Thesis, MIT 2015)
 %\bibitem[LoA15]{ssa-book} ``Lots of authors'' -- \emph{Static Single Assignment Book} (2015)
-
 \bibitem{julia-web} \verb~http://julialang.org~
 \bibitem{gf-web} \verb~https://github.com/carnaval/green-fairy~
+\bibitem{escher} \verb~https://github.com/shashi/Escher.jl~
 \end{thebibliography}
+\clearpage
+\section*{Appendix}
+
+\begin{figure}[H]
+\includegraphics[scale=0.3]{capt.png}
+\caption{Visualizing the analysis}
+The tool allows for step-by-step or live iteration and proved quite useful in debugging the implementation.
+\end{figure}
 
 \end{document}
 
