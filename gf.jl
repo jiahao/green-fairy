@@ -926,10 +926,10 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                     push!(get!(names_set, ref, Set{Int}()), li)
                 end
             end
-            println("SUM $pc")
+            #=println("SUM $pc")
             for (k,v) in summarized
                 println("\t$k ", v)
-            end
+            end=#
             #=for (k,v) in field_mapping
                 println("\tfield $k ", v)
             end=#
