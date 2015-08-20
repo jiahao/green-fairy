@@ -252,10 +252,10 @@ A function is a control graph composed of extended basic blocks (EBB). Their def
 As their name indicate they describe field access and mutation on Julia objects.
 
 Our implementation deals with most of the current Julia semantic.
-We will leave out some of those features because while they require additional work, they are not directly relevant to this report. This includes
+We will leave out some of those features because while they required additional work, they are not directly relevant to this report. This includes
 \begin{itemize}
 \item Exception handling. Even though special care was taken to handle it with complete precision (assuming of course precise throw-site information).
-\item Closure capture.
+\item Closure variable captures.
 \item Function calls with variable number of arguments, or ``splatting''.
 \item Arrays of references. We treat them as an object with a single weakly updated field.
 \end{itemize}
@@ -364,8 +364,11 @@ The sparse map discussed in the previous section can be used as a basis to imple
 
 This structure cannot be readily used for general relational domains, however we can extract an important insight from the non-relational case. We can think of the $\phi$ node living at an EBB's head as a summary of the state difference on any path between its immediate dominator and itself. It is less apparent in the case of a non-relational domain, since this difference is usually represented as an element of the domain itself, i.e., a small name-value mapping that only refers to changed names.
 
+In other words, the property we can try to preserve for a relational domain is that the full flow-sensitive state can be materialized at any point in the program by combining the partial states along the dominator tree spine.
+This materialization does not need to happen in transfer computations, since most transfer operators only access a small portion of the state.
 
-[good example + explanation of a generic translation]
+In the next section, we apply this to the heap shape domain.
+It is likely that this transform could be expressed in a common framework of which the non-relational instance is a special case.
 
 \section*{Shape analysis}
 
@@ -435,7 +438,7 @@ Given a program point $a$ and a variable definition $x$ dominating $a$, we can c
 
 We can see from this description that additional work is needed to materialize the point-to set of a definition $x$ at a control point further away from the definition point.
 \begin{algorithm}
-\footnotesize
+\tiny
 \setlength\columnsep{-1pt}
 \begin{multicols}{2}
 \begin{algorithmic}
