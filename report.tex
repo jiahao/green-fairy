@@ -109,12 +109,12 @@ In the longer term, the natural extension to this work is to devise an intuitive
 Those points are developed further along in the report.
 \clearpage
 \section*{Julia}
-Julia has a dynamically-typed semantic. The execution model is that of a typical imperative language : impure and call by value. It is entierly built around the concept of generic functions.
+Julia has a dynamically-typed semantic. The execution model is that of a typical imperative language: impure and call by value. It is entierly built around the concept of generic functions.
 
 \paragraph{Type system} In Julia, simple types are organized into a single-inheritence subtyping tree.
 They are optionally parametrized by arbitrary values, including other types.
 The type lattice is the closure of simple types under finite unions and bounded existentials.
-Although parametrized types are invariant, one can construct covariant types using existentials : $\exists \text{T}\leq\text{Number}, \text{Vector}\{\text{T}\}$ can be thought of the covariant version of $\text{Vector}\{\text{Number}\}$.
+Although parametrized types are invariant, one can construct covariant types using existentials: $\exists \text{T}\leq\text{Number}, \text{Vector}\{\text{T}\}$ can be thought of the covariant version of $\text{Vector}\{\text{Number}\}$.
 
 \paragraph{Generic functions} A function in Julia is in fact a collection of methods, partially ordered by their signature types as a sub-lattice of the type lattice\cite{julia-paper}.
 The dispatch mechanism is dynamic -- albeit statically inferred in many cases -- and is symmetric in all the arguments: the most specific method will be called at run-time depending on the argument types.
@@ -136,13 +136,14 @@ The project started in this internship aims to address the limitation that the o
 \section*{Green Fairy}
 
 The Green Fairy provides a generic framework that computes the fixed point of user-provided abstractions over a Julia program.
-The library handles the control flow semantics and presents itself as an extensible interpreter : users enrich the abstract machine's state with custom abstractions.
+The library handles the control flow semantics and presents itself as an extensible interpreter: users enrich the abstract machine's state with custom abstractions.
 We will assume that the reader is familiar with the formalism of abstract interpretation\cite{absint-cousot}.
 
 We provide a set of generic basic blocks to construct those state extensions.
 The most common one is a non-relational variable analysis over any value domain.
 For example, instantiating this variable state domain over the value lattice of constants builds the algorithm known as Sparse Conditional constant propagation\cite{sparsecp}.
 It can be used jointly with the supplied parametric reduced product\cite{redprod} implementation, allowing for cooperative behavior between different domains.
+
 
 We will start by giving two simple examples of value domains implementations.
 
@@ -385,13 +386,13 @@ The abstract address of an object is given by the exact set of stack variables t
 It means that we can represent the abstract heap as a collection of set of variable names.
 The main advantage of this approach compared to the other usual choices, such as allocation site segregation, is that transfer functions operating on objects referenced by variables can \emph{always} perform strong updates.
 It is due to the fact that each one of those abstract addresses can refer to at most a single object in any given concrete heap.
-Another very important point about this choice is that it provides a canonical way to compare two abstract heaps : there is no ambiguity on the mapping between the nodes, avoiding any kind of graph isomorphism problems.
+Another very important point about this choice is that it provides a canonical way to compare two abstract heaps: there is no ambiguity on the mapping between the nodes, avoiding any kind of graph isomorphism problems.
 
 In this representation, any pair of node that share a variable are incompatible: no concrete heap can have both, since the variable must have a well defined value.
 This incompatibility must be used in transfer function to avoid losing precision.
 
 In this framework there is no explicit representation of the may/must alias sets.
-We can construct them in the following way :
+We can construct them in the following way:
 \begin{align*}
 & p(H,x) = \left\{ o \in H ~|~ x \in o \right\} \\
 & \text{may-alias}(H,x) = \left\{ y~|~ p(y)\cap p(x) \neq \emptyset \right\} \\
@@ -423,7 +424,7 @@ where $\text{dom}(\tilde{x})$ is the set of variable having their definition in 
 
 As we alluded to in the previous section, one can look at the restriction to dominating definitions as a \emph{summarization} of the state between the $\phi$'s EBB head and its immediate dominator.
 
-From this formulation, we can deduce a sparse format for this simplified shape graph : there is a consequent amount of sharing between subsequent states. In fact, we can see from the transfer functions that they only need to manipulate the ``most recently'' defined variables in each object.
+From this formulation, we can deduce a sparse format for this simplified shape graph: there is a consequent amount of sharing between subsequent states. In fact, we can see from the transfer functions that they only need to manipulate the ``most recently'' defined variables in each object.
 In \cite{ssa-alias}, this sharing is exploited by representing heap objects as sorted singly-linked list with hash-consing. The elimination of redundancy is thus implicitly handled by the data structure.
 
 It has the benefit of keeping the implementation close to the mathematical structure, but forces the algorithm to keep the linked list heads of \emph{all} live heap objects at all control points, defeating some of the sparsity.
