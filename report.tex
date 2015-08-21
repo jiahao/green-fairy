@@ -240,7 +240,21 @@ meet_ext{T,n}(v1::Lattice, v2::FiniteSum{T,n}) =
 
 Here, we show that this finite disjunction can specify the reduced product reduction for both $T_1\times\left(\sqcup^nT_2\right)\to T_1$ and $\left(\sqcup^nT_2\right)\times T_1 \to \sqcup^nT_2$ with no particular knowledge of $T_1$ or $T_2$.
 
-Those two examples illustrate the benefits of the pervasive use of ad hoc polymorphism and multiple dispatch in Julia: it allows for the construction of reusable abstractions.
+Those two examples illustrate the benefits of the pervasive use of ad hoc polymorphism and multiple dispatch in Julia: it allows for the construction of reusable abstractions. More explicitely, using those one could combine them using our reduced product implementation in a single value domain, for example $\text{Interval}_{\text{Int}}\cap\left(\sqcup^3\text{Const}\right)$. In Julia this would be \verb~Prod{Tuple{Interval{Int},FiniteSum{Const,3}}}~ and canonicalizes e.g.
+
+\[ \left[0,3\right]\cap\left\{1,2,5\right\} = \left[1,2\right]\cap\left\{1,2\right\} \]
+
+However, those two domains need tighter integration to realize that small intervals can describe a finite set of values.
+We can easily add this behavior with a method definition such as
+
+\begin{lstlisting}[language=julia]
+meet_ext(v1::FiniteSum{Const,n}, v2::Interval{Int}) =
+   v2.hi - v2.lo <= n ? meet(v1, map(Const, FiniteSum([v2.lo:v2.hi...])) : v1
+\end{lstlisting}
+
+Now, we also have
+
+\[ \left[0,2\right]\cap\top = \left[0,2\right]\cap\left\{0,1,2\right\} \]
 
 Several important opt-in features for value domains and their transfer functions were not described here for the sake of brevity. This includes fused join-comparisons, widening, participation in the dispatch machinery, the ability to control the propagation of values over function call boundaries (context sensitivity), as well as state-altering actions such as exception raising or heap operations.
 
@@ -735,7 +749,8 @@ Creating a strong edge removes any weak edge sharing the same label and origin.
 Field access transfer is unchanged by the addition of context nodes: it must follow weak edges conservatively in addition to strong edges.
 
 The point of this construction is to setup a context insensitive model of the caller's heap: an infinite tree of $\gamma$ nodes that assumes no aliasing.
-One can see it as the \emph{free} heap. Each node is uniquely identified by the field path that leads to it from the function argument.
+One can see it as the \emph{free} heap, in the sense of a free algebraic object.
+Each node is uniquely identified by the field path that leads to it from the function argument.
 
 When a function call returns into the caller, it must first contract pairs of $\gamma$ nodes to match the shape of its pre-call heap.
 The caller also removes every weak edge from the callee's heap.
@@ -801,7 +816,7 @@ This would obviously not replace a formal proof of soundness but would help weed
 
 \paragraph{Visualization}
 As a way to help implementation work, a graphical visualization of the interpreter was hastily put together using the \verb~Escher.jl~ library\cite{escher}.
-The usefulness of this tool exceeded our -- admittedly low -- expectations. A screen capture is provided in the appendix.
+The usefulness of this tool exceeded our -- admittedly low -- expectations. A screen capture is provided in Figure \ref{bla}.
 We believe that interactive feedback is a key aspect of allowing users with no particular background in program analysis to develop an understanding of the -- in fact quite natural -- underlying model.
 It would be interesting to explore the design space of such tools.
 
@@ -827,12 +842,12 @@ It would be interesting to explore the design space of such tools.
 \bibitem{escher} \verb~https://github.com/shashi/Escher.jl~
 \end{thebibliography}
 \clearpage
-\section*{Appendix}
 
 \begin{figure}[H]
 \includegraphics[scale=0.3]{capt.png}
 \caption{Visualizing the analysis}
 The tool allows for step-by-step or live iteration and proved quite useful in debugging the implementation.
+\label{bla}
 \end{figure}
 
 \end{document}
