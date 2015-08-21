@@ -69,7 +69,7 @@
 \vspace{1.5ex}
 \subsection*{General context}
 
-Julia\cite{julia-paper,julia-web} is a dynamically typed, JIT compiled, programming language implementation with an emphasis on generic programming through a powerful and ubiquitous symmetric, dynamic multiple dispatch mechanism. It achieves superior run-time performance by relying heavily on static analysis and aggressive code specialization. It is meant to provide a tool for scientific computations that is both familiar and fast enough for this demanding usage. The Julia compiler also provides a range of metaprogramming and code generation techniques to the advanced user.
+Julia\cite{julia-paper,julia-web} is a dynamically typed, JIT compiled, programming language implementation with an emphasis on generic programming through a powerful and ubiquitous symmetric, dynamic multiple dispatch mechanism. It achieves superior run-time performance by relying heavily on static analysis and aggressive code specialization. It is meant to provide a tool for scientific computations that is both familiar and fast enough for this demanding usage. The Julia compiler also provides a range of meta-programming and code generation techniques to the advanced user.
 
 Efforts into optimizing dynamic languages date back to Common Lisp tradition\cite{cl}, and more recently the sizable effort into making various JavaScript engines reach high performance\cite{js-trace}. Julia has the interesting advantage of having been designed from the ground up to be a good analysis target and, while being dynamic, avoids pathological behavior patterns that are very hard to infer statically.
 
@@ -79,7 +79,7 @@ Most optimizations in the Julia compiler are done by the LLVM\cite{llvm} library
 
 Some program optimizations would be better performed on the much higher level semantic that Julia code exhibits earlier in the compilation pipeline. The backend has to deal with additional complexity due to the integration between the generated code and the various run-time systems: dynamic memory allocation, garbage collection, dynamic dispatch call-sites, ...
 
-At the Julia level, all those operations are implicit and the allowed behaviors are much more restricted: it has no interior pointers, no stack escape, memory operations cannot trap, type-punning is forbidden, the list goes on. It makes some analysis easier, especially those modelling memory, such as alias and shape analysis.
+At the Julia level, all those operations are implicit and the allowed behaviors are much more restricted: it has no interior pointers, no stack escape, memory operations cannot trap, type-punning is forbidden, the list goes on. It makes some analysis easier, especially those modeling memory, such as alias and shape analysis.
 
 \subsection*{Proposed contributions}
 
@@ -92,7 +92,7 @@ It also features a work-in-progress interprocedural flow-sensitive shape analysi
 \subsection*{Arguments supporting their validity}
 
 The implementation is available as an ongoing work at \cite{gf-web}. It is already capable of applying both value-level (currently constant propagation and type inference) and shape analysis to a significant body of Julia code.
-On this body of code, it matches or exceeds the precisoin of Julia's current type inference pass.
+On this body of code, it matches or exceeds the precision of Julia's current type inference pass.
 It succeeds in demonstrating our ideas on a \emph{non-toy} real world language, including its more exotic and idiosyncratic features.
 We hope to integrate our work into the main compiler in the coming year.
 
@@ -104,14 +104,14 @@ A consequent amount of technical work has to be done to make the later stages of
 Today, there is no straightforward way of taking advantage of new static information during compilation.
 In particular, we plan to implement optimizations using the shape analysis to provide precise no-escape information that will allow memory reuse and stack allocation, greatly reducing the load on the garbage collector and the dynamic allocator.
 
-In the longer term, the natural extension to this work is to devise an intuitive interface that makes it possible for users to extend the abstract state of the interpreter with domain-specific informations. We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use.
+In the longer term, the natural extension to this work is to devise an intuitive interface that makes it possible for users to extend the abstract state of the interpreter with domain-specific information. We hypothesize that there is a large class of optimizations that are hard-to-impossible to teach a compiler using only knowledge of the language's semantic, but are fairly easy to formulate once more information is given about specific data structures and idioms in use.
 
 Those points are developed further along in the report.
 \clearpage
 \section*{Julia}
-Julia has a dynamically-typed semantic. The execution model is that of a typical imperative language: impure and call by value. It is entierly built around the concept of generic functions.
+Julia has a dynamically-typed semantic. The execution model is that of a typical imperative language: impure and call by value. It is entirely built around the concept of generic functions.
 
-\paragraph{Type system} In Julia, simple types are organized into a single-inheritence subtyping tree.
+\paragraph{Type system} In Julia, simple types are organized into a single-inheritance subtyping tree.
 They are optionally parametrized by arbitrary values, including other types.
 The type lattice is the closure of simple types under finite unions and bounded existentials.
 Although parametrized types are invariant, one can construct covariant types using existentials: $\exists \text{T}\leq\text{Number}, \text{Vector}\{\text{T}\}$ can be thought of the covariant version of $\text{Vector}\{\text{Number}\}$.
@@ -127,7 +127,7 @@ Generic functions have interesting repercussions on analysis strategies. Since v
 \paragraph{Memory model} At the specification level, Julia objects are tagged memory cells living in an infinite heap. Each has a finite set of numbered mutable fields, possibly pointing to other objects. The language relies on automatic memory management to fit in a physical finite heap.
 The current implementation uses a generational tracing garbage collector. % bragging rights
 
-\paragraph{Compiler} The main analysis performed on Julia code by the compiler is an interprocedural flow-sensitive type inference. It is followed by an inlining pass and several ad-hoc peephole optimization. The last step is to generate LLVM intermediate representation while using the infered types to remove as much of the dynamic semantic as possible.
+\paragraph{Compiler} The main analysis performed on Julia code by the compiler is an interprocedural flow-sensitive type inference. It is followed by an inlining pass and several ad hoc peephole optimization. The last step is to generate LLVM intermediate representation while using the inferred types to remove as much of the dynamic semantic as possible.
 The approach of using a dynamic semantic complemented by type inference has the advantage that the inference pass can be customized without breaking user code.
 Heuristics are added transparently as certain language idioms become popular and require special treatment for a precise analysis.
 
@@ -173,7 +173,7 @@ end
 
 This domain is parametric over any ordered numeric types having an upper and lower bound. Defining a method for \verb~isbot~ is necessary since there are multiple representation of $\bot$.
 
-The \verb~meet_ext~ function is the product domain reduction function. In that case we express that the knowledge that a value is constant can reduce an interval to a single point or $\bot$ depending on the particular value. We are free to add other method definitions to this function to increase precision using information from other domains than \verb~Const~. This modelization of the reduced product relies on multiple dispatch to easily provide extension points: the user can seamlessly provide reduction functions for any pair of domains, possibly defined by someone else.
+The \verb~meet_ext~ function is the product domain reduction function. In that case we express that the knowledge that a value is constant can reduce an interval to a single point or $\bot$ depending on the particular value. We are free to add other method definitions to this function to increase precision using information from other domains than \verb~Const~. This modeling of the reduced product relies on multiple dispatch to easily provide extension points: the user can seamlessly provide reduction functions for any pair of domains, possibly defined by someone else.
 
 Describing transfer functions is also straightforward, as demonstrated by this simple example implementing the transfer for the addition on the interval lattice:
 \begin{singlespace}
@@ -192,7 +192,7 @@ We can see that the arguments can be provided in different domain than that of i
 
 \subsection*{Finite disjunction}
 
-We give another example that demonstrates the construction of a \emph{finite disjunction} domain that is parametric over any other domain and can thus serve as a composable building block. It can be used to enhance precision while keeping the implementation simple and decoupled. For the sake of simplicity, the implementation shown here is very naive: the widening does $O(n^3)$ comparisons and transfer is exponential in the number of arguments. Nonetheless, nothing prevents swapping this implementation for a more efficient one while keeping the genericity of the interface and its independence over the underlying domain.
+We give another example that demonstrates the construction of a \emph{finite disjunction} domain that is parametric over any other domain and can thus serve as a composable building block. It can be used to enhance precision while keeping the implementation simple and decoupled. For the sake of simplicity, the implementation shown here is very naive: the widening does $O(n^3)$ comparisons and transfer is exponential in the number of arguments. Nonetheless, nothing prevents swapping this implementation for a more efficient one while keeping the generality of the interface and its independence over the underlying domain.
 
 \begin{lstlisting}[language=julia]
 immutable FiniteSum{T <: Lattice,n}
@@ -240,7 +240,7 @@ meet_ext{T,n}(v1::Lattice, v2::FiniteSum{T,n}) =
 
 Here, we show that this finite disjunction can specify the reduced product reduction for both $T_1\times\left(\sqcup^nT_2\right)\to T_1$ and $\left(\sqcup^nT_2\right)\times T_1 \to \sqcup^nT_2$ with no particular knowledge of $T_1$ or $T_2$.
 
-Those two examples illustrate the benefits of the pervasive use of ad-hoc polymorphism and multiple dispatch in Julia: it allows for the construction of reusable abstractions.
+Those two examples illustrate the benefits of the pervasive use of ad hoc polymorphism and multiple dispatch in Julia: it allows for the construction of reusable abstractions.
 
 Several important opt-in features for value domains and their transfer functions were not described here for the sake of brevity. This includes fused join-comparisons, widening, participation in the dispatch machinery, the ability to control the propagation of values over function call boundaries (context sensitivity), as well as state-altering actions such as exception raising or heap operations.
 
@@ -264,7 +264,7 @@ We will leave out some of those features because while they required additional 
 \section*{Analysis sparsity}
 
 The Green Fairy is oriented towards building flow-sensitive analysis, that is, it provides information dependent on the program point.
-The advantage of flow sensitivity is in the precision gain, although it comes with a performance price compared to the more approximative flow-insensitive analysis.
+The advantage of flow sensitivity is in the precision gain, although it comes with a performance price compared to the more approximate flow-insensitive analysis.
 There are different techniques to lower the cost of flow sensitivity.
 
 A simple way to implement a flow-sensitive computation is to store a dense mapping of program points to interpreter state. It has the benefit of being oblivious to the structure of said state.
@@ -558,7 +558,7 @@ Nodes with explicit variable names are part of an EBB's head summary (our ``$\ph
 
 \subsection*{Object fields}
 
-The full abstract heap model with object field is a graph where nodes are labelled with sets of variable definitions and edges with field indices.
+The full abstract heap model with object field is a graph where nodes are labeled with sets of variable definitions and edges with field indices.
 We will describe most of the abstract semantic assuming a single field name for simplicity, but the extension to a finite number field names is straightforward.
 Adding object fields also implies the presence of summary nodes. They are necessary to avoid infinite increasing chain in the lattice of shape graphs.
 A summary node is a node that no local variable points to, and may represent several concrete objects.
@@ -700,8 +700,8 @@ The first graph shows the general case. The second is an example demonstrating i
 \label{fig:fatrans}
 \end{figure}
 
-\paragraph{Implementation} Object fields are additional edges in the alias tree, labelled with a field index.
-Given an initial segment $x_1\dots x_n$ of the forest, we define the possible values of its $k$th field to be the set of destination of $k$-edges originating at $x_p$ where $p$ is the largest index such that $x_p$ has at least one $k$-edge.
+\paragraph{Implementation} Object fields are additional edges in the alias tree, labeled with a field index.
+Given an initial segment $x_1\dots x_n$ of the forest, we define the possible values of its $k$-th field to be the set of destination of $k$-edges originating at $x_p$ where $p$ is the largest index such that $x_p$ has at least one $k$-edge.
 Given this description, translating the abstract transfer into an implementation over the forest is straightforward.
 
 When summarizing the alias tree, we collect fields set during the summarized segment of code and copy those in the EBB head.
@@ -714,7 +714,7 @@ Making a heap analysis scale well interproceduraly is challenging.
 The most straightforward way of introducing context sensitivity is through \emph{heap cloning}.
 Although it has been demonstrated that heap cloning can scale very well\cite{heapclone}, this result is only in the context of a flow-insensitive analysis.
 
-We make the choice not to introduce any context sensitive information while computing the fixpoint of the abstract heap over a function.
+We make the choice not to introduce any context sensitive information while computing the fixed point of the abstract heap over a function.
 In the situation we presented until now, we would have to treat function arguments -- and objects reachable from them -- conservatively as a single summary node.
 We instead introduce a new type of node that tries to keep more information by being less pessimistic about aliasing.
 Of course, inside the callee, we still can't answer the question whether those outside objects alias each other or not.
@@ -743,7 +743,7 @@ This establishes a mapping between caller objects reachable from passed argument
 The caller can then apply field mutation to its own heap following the edges of the callee.
 
 As for the implementation, obviously, the infinite tree is not materialized: it is constructed lazily.
-This means that weak edges must be kept separatly to be retroactively applied to materialized nodes.
+This means that weak edges must be kept separately to be retroactively applied to materialized nodes.
 
 \paragraph{Improvements} Several improvements to this scheme are possible that we did not implement as of today.
 In particular, one can keep a partial ordering of strong edges recording temporality of the field mutation (ties are possible when joining two heaps together).
@@ -769,7 +769,7 @@ We will discuss longer term objectives and projects here, keeping in mind that t
 \paragraph{Backward analysis}
 Our implementation only provides facilities for forward analysis.
 Several fundamental analysis, such as variable liveness, necessitate backward propagation.
-We wish to extend the fixpoint computation to support those use case, including the generalization of our sparse structure to backward dataflow (similar to the Static Single Information form).
+We wish to extend the fixed point computation to support those use case, including the generalization of our sparse structure to backward dataflow (similar to the Static Single Information form).
 
 \paragraph{Generic sparsification} We hypothesize that a general transform from dense to sparse state structure underlies the particular one presented in this report and included in our implementation.
 Although we do not hope for a fully mechanized way to do such a conversion, it is likely that we could provide a set of generic reusable component to make the implementation as well as the soundness proof of those state domains easier.
@@ -787,8 +787,8 @@ BLAS is easy to use under a simple model where the output of the routines is fre
 However, the rules of BLAS aliasing are very regular at a high level and someone writing a wrapper for the library could easily, given the right interface, integrate those rules directly as a compiler extension.
 
 Another simple example that was brought to our attention: an user is in the process of writing an access layer for a remote database.
-The interface provided is able to use arbitrary julia functions for, e.g., predication.
-As an optimization, it would be useful to provide a way to overapproximate the set of datum that the predicate will load at run-time to perform prefetching.
+The interface provided is able to use arbitrary Julia functions for, e.g., predication.
+As an optimization, it would be useful to provide a way to over-approximate the set of datum that the predicate will load at run-time to perform prefetching.
 This analysis has no purpose outside of this particular use case.
 However, reimplementing all Julia semantics is wasteful considering that the database specific part of the analysis is relatively small.
 
