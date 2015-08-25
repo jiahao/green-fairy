@@ -227,10 +227,10 @@ function loc_name(loc)
     end
 end
 
-function edge_to(io, loc1, loc2, bnd)
+function edge_to(io, loc1, loc2, bnd,col="black",lbl="")
     if loc2.ref_idx != 0 && loc1 != loc2 && loc1.ref_idx != 0
         bend = string(",bend ", (bnd ? "left":"right"),"=3ex")
-        println(io, "\\draw[->,thick,black", "] (", loc_name(loc1), ") edge (", loc_name(loc2), ");")
+        println(io, "\\draw[->,thick,$col", "] (", loc_name(loc1), ") edge (", loc_name(loc2), ");")
     end
 end
 
@@ -309,7 +309,99 @@ function to_tikz(sched, fc)
         println(io, "\\\\")
     end
     println(io, "\\end{tabular}")
+    println(io, "\\begin{tikzpicture}[overlay]")
+    for (srcloc,flds) in ls.heap_fields
+        for (fld, dstlocs) in flds
+            for dstloc in dstlocs
+                edge_to(io, srcloc, dstloc, false, COLORS[fld], fld)
+            end
+        end
+    end
+    println(io, "\\end{tikzpicture}")
     println(io, "\\end{document}")
     open(f -> print(f, takebuf_string(io)), "out.tex", "w")
     run(`pdflatex out.tex`)
+end
+
+function _heap_to_dot(io, ls, pc, objects)
+    println(io, "graph[rankdir=\"TB\"];")
+    println(io, "\tpc$(pc)head [style=invis,shape=none,width=0,height=0,fixedsize=\"false\",label=\"\"];");
+    println(io, "\tpc$(pc)tail [style=invis,shape=none,width=0,height=0,fixedsize=\"false\",label=\"\"];");
+    for (i, (locs, vars)) in enumerate(objects)
+        println(io, "\tpc$(pc)_",i," [label=\"", Base.join(map(li->ls.local_names[li],vars)," "), " (", first(locs).def.pc, ")\"];")
+        println(io, "\tpc$(pc)head -> pc$(pc)_$i [style=invis]")
+        println(io, "\tpc$(pc)_$i -> pc$(pc)tail [style=invis]")
+        found_flds = Set{Int}()
+        for loc in locs
+            haskey(ls.heap_fields, loc) || continue
+            for (fld,dsts) in ls.heap_fields[loc]
+                fld in found_flds && continue
+                push!(found_flds, fld)
+                for dst in dsts
+                    for (j, (locs, _)) in enumerate(objects)
+                        if dst in locs
+                            println(io, "\tpc$(pc)_", i, "->pc$(pc)_", j, " [label=\"", fld, "\"];")
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+function heap_to_dot(ls, pc)
+    io = IOBuffer()
+    println(io, "digraph {")
+    _heap_to_dot(io, ls, pc, collect(GreenFairy.materialize_heap(ls,pc)))
+    println(io, "}")
+    seekstart(io)
+    open(f->write(f,readall(io)), "out.dot", "w")
+end
+function heap_to_dot(ls)
+    io = IOBuffer()
+    println(io, "digraph {")
+    println(io, "graph[rankdir=\"TB\"];")
+    println(io, "compound=true;")
+    objects = Dict{Int,Vector{Any}}()
+    for pc = 1:length(ls.code.body)
+        objects[pc] = collect(GreenFairy.materialize_heap(ls,pc))
+    end
+    edges = Vector{Tuple{Int,Int}}()
+    for pc = 1:length(ls.code.body)-1
+        if !isa(ls.code.body[pc+1], LabelNode)
+            push!(edges, (pc,pc+1))
+        end
+    end
+    for (lbl,preds) in enumerate(ls.dtree.pred)
+        srcpc = ls.code.label_pc[lbl]
+        for (_, predpc) in preds
+            push!(edges, (predpc,srcpc))
+        end
+    end
+    folds = Dict{Int,Int}()
+    for pc = 1:length(ls.code.body)
+        if  count(e -> e[2] == pc, edges) == 1 &&
+            count(e -> e[1] == pc, edges) == 1
+            pred = edges[findfirst(e->e[2]==pc, edges)][1]
+            @show objects[pred] objects[pc]
+            if  count(e->e[1] == pred, edges) == 1 &&
+                objects[pred] == objects[pc]
+                folds[pc] = pred
+                edges = unique(map!(e->map(i -> i == pc ? pred : i, e), edges))
+                filter!(e -> e[1] != e[2], edges)
+                continue
+            end
+        end
+        println(io, "subgraph cluster$pc {")
+        _heap_to_dot(io, ls, pc, objects[pc])
+        println(io, "\tlabel = \"", pc, "\";")
+        println(io, "\tstyle = \"dashed\";")
+        println(io, "}")
+    end
+    for (src,dst) in edges
+        println(io, "\tpc$(src)tail -> pc$(dst)head [ltail=cluster$(src), lhead=cluster$(dst)];")
+    end
+    println(io, "}")
+    seekstart(io)
+    open(f->write(f,readall(io)), "out.dot", "w")
+    open(f->run(pipe(`dot -Tsvg out.dot`, stdout=f)), "out.svg", "w")
 end

@@ -590,7 +590,7 @@ end
 # TODO better name
 # TODO move the heap_use API outside, and make it more reasonable
 function propagate_heap!(s, obj, pc, into, exclu, debug=false)
-    obj != :global || return false
+    obj != :global || return false # TODO remove me
     new_heap = Array(HeapRef, 0)
     chgd = false
     local p, li
@@ -611,29 +611,30 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
     elseif isa(obj, HeapLoc)
         push!(new_heap, heap_deref(s,obj))
         obj = obj.def
+        println("Dom path for HL $(obj.pc) $pc")
         p = dom_path_to(s.code, s.dtree, obj.pc, pc)
+        @goto init_done
     else
         println("Unknown $obj")
         error()
     end
     # fill initial heap state
-    if !isa(obj,HeapLoc)
-        if !obj.isphi
-            for i in eachindex(s.heap[obj.pc])
-                ref = s.heap[obj.pc][i]
-                push!(new_heap, HeapRef(HeapLoc(obj,i),ref.gen,ref.alloc,ref.outside))
-            end
-        else
-            @assert(li > 0)
-            phi_h = s.phi_heap[obj.pc]
-            for ref_i in eachindex(phi_h.refs)
-                if li in phi_h.defs[ref_i]
-                    ref = phi_h.refs[ref_i]
-                    push!(new_heap, HeapRef(HeapLoc(obj,ref_i),ref.gen,ref.alloc,ref.outside)) 
-                end
+    if !obj.isphi
+        for i in eachindex(s.heap[obj.pc])
+            ref = s.heap[obj.pc][i]
+            push!(new_heap, HeapRef(HeapLoc(obj,i),ref.gen,ref.alloc,ref.outside))
+        end
+    else
+        @assert(li > 0)
+        phi_h = s.phi_heap[obj.pc]
+        for ref_i in eachindex(phi_h.refs)
+            if li in phi_h.defs[ref_i]
+                ref = phi_h.refs[ref_i]
+                push!(new_heap, HeapRef(HeapLoc(obj,ref_i),ref.gen,ref.alloc,ref.outside)) 
             end
         end
     end
+    @label init_done
     if debug
         println("Starting with $new_heap")
     end
@@ -748,12 +749,12 @@ function restrict_heap_ref(s, h, pc)
 end
 
 
-function heap_field!(s::LocalStore,ref::HeapRef,field::Int,result::Set{HeapLoc})
-    while !heap_loc_getfield!(s,ref.loc,field,result) && ref.loc.ref_idx != 0
-        if !ref.loc.def.isphi
-            ref = s.heap[ref.loc.def.pc][ref.loc.ref_idx]
+function heap_field!(s::LocalStore,loc::HeapLoc,field::Int,result::Set{HeapLoc})
+    while !heap_loc_getfield!(s,loc,field,result) && loc.ref_idx != 0
+        if !loc.def.isphi
+            loc = s.heap[loc.def.pc][loc.ref_idx].loc
         else
-            ref = s.phi_heap[ref.loc.def.pc].refs[ref.loc.ref_idx]
+            loc = s.phi_heap[loc.def.pc].refs[loc.ref_idx].loc
         end
     end
 end
@@ -883,6 +884,8 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         end
 
         # update heap refs
+        # TODO this whole thing should start to approach correctness but is really inefficient
+        #      rewrite it as one-pass inplace when more confident that is correct
         phi_heap = get!(s.phi_heap, pc, PhiHeap())
         #println("Updating ϕ $k at $pc : ", s.defs[li].phis[lbl])
         for (i,pred_edge) in enumerate(s.dtree.pred[lbl])
@@ -893,7 +896,10 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             summarize_mapping = Dict{HeapLoc,HeapRef}()
             # li => actuals
             local_mapping = Dict{Int,Set{HeapRef}}()
-
+            
+            field_mapping = Dict{HeapLoc,Dict{Int,Set{HeapLoc}}}()
+            # loc => this_phi_ref_id
+            commit_mapping = Dict{HeapLoc,Int}()
             queue = Set{HeapRef}()
             
             additional = Array(HeapRef,0)
@@ -910,11 +916,12 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                 push!(done, ref)
                 restricted_ref,restricted_fields = restrict_heap_ref(s, ref, idom_pc)
                 summarize_mapping[ref.loc] = restricted_ref
-                #field_mapping[ref.loc] = restricted_fields
-                for (_,field_refs) in restricted_fields
-                    for field_ref in field_refs
-                        if !(field_ref in done)
-                            push!(queue, field_ref)
+                for (k,field_locs) in restricted_fields
+                    for field_loc in field_locs
+                        if !(field_loc in done)
+                            dest = heap_deref(s,field_loc)
+                            push!(queue, dest)
+                            push!(get!(get!(field_mapping, ref.loc, Dict{Int,Set{HeapLoc}}()), k, Set{HeapLoc}()), field_loc)
                         end
                     end
                 end
@@ -933,6 +940,10 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             #=for (k,v) in field_mapping
                 println("\tfield $k ", v)
             end=#
+            println("SUMMARY $pc")
+            display(summarize_mapping)
+            display(summarized)
+            display(field_mapping)
             # commit the changes
             for (ref_i, ref) in enumerate(phi_heap.refs)
                 if haskey(summarized, ref.loc)
@@ -951,25 +962,32 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                                 push!(phi_heap.incs[ref_i], i)
                                 chgd = true
                             end
-                            # fields
-                            #=haskey(field_mapping,actual_other_ref) || continue
-                            if !haskey(s.heap_fields, this_loc)
-                                s.heap_fields[this_loc] = Dict{Int,Set{HeapLoc}}()
-                            end
-                            fields = s.heap_fields[this_loc]
-                            for (f,v) in field_mapping[actual_other_ref]
-                                if !haskey(fields, f)
-                                    fields[f] = v
-                                    chgd = true
-                                elseif !(fields[f] <= v)
-                                    union!(fields[f], v)
-                                    chgd = true
-                                end
-                            end=#
+                            commit_mapping[actual_other_ref.loc] = ref_i
                         end
                     end
                 end
             end
+            # field could be already materialized, need report
+            for (loc,ref_i) in commit_mapping
+                this_loc = HeapLoc(Def(true,pc),ref_i)
+                if haskey(s.heap_fields, this_loc)
+                    reported = Set{HeapLoc}()
+                    for fld in keys(s.heap_fields[this_loc])
+                        println("TRYREPORT($i) $pc $this_loc $fld $loc")
+                        if !haskey(field_mapping, loc) || !haskey(field_mapping[loc], fld)
+                            println("\tSUCC $(s.heap_fields[this_loc][fld])")
+                            heap_field!(s, heap_deref(s,this_loc).loc, fld, reported)
+                            for r in reported
+                                r = haskey(commit_mapping, r) ? HeapLoc(Def(true,pc),commit_mapping[r]) : r
+                                push!(s.heap_fields[this_loc][fld], r)
+                            end
+                            println("\tSUCC $(s.heap_fields[this_loc][fld])")
+                            empty!(reported)
+                        end
+                    end
+                end
+            end
+
 
             for (refloc,locals) in summarized
                 for (actual_ref,names) in locals
@@ -978,13 +996,41 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                     push!(phi_heap.incs, Set{Int}([i]))
                     ref_i = length(phi_heap.refs)
                     this_loc = HeapLoc(Def(true,pc),ref_i)
-                    #=@assert !haskey(s.heap_fields,this_loc)
-                    if haskey(field_mapping,actual_ref)
-                        s.heap_fields[this_loc] = field_mapping[actual_ref]
-                    end=#
+                    commit_mapping[actual_ref.loc] = ref_i
                     chgd = true
                 end
             end
+            this_def = Def(true,pc)
+            for (k,fields) in field_mapping
+                for (fld,values) in fields
+                    for v in values
+                        k_refi = commit_mapping[k]
+                        real_k = HeapLoc(this_def, k_refi)
+                        real_v = haskey(commit_mapping, v) ? HeapLoc(this_def, commit_mapping[v]) : v
+                        k_fields = get!(s.heap_fields, real_k, Dict{Int,Set{HeapLoc}}())
+                        # report fields values from other incs (symetric case to the one above)
+                        if !haskey(k_fields, fld)
+                            v_set = Set{HeapLoc}()
+                            for pred_i in phi_heap.incs[k_refi]
+                                pred_i != i || continue
+                                println("REPORT fld:$fld $pc, ", pred_i, " ", i, " ", k, " ", v_set)
+                                heap_field!(s, real_k, fld, v_set)
+                                println("\t", v_set)
+                                chgd = true
+                                break
+                            end
+                            k_fields[fld] = v_set
+                        end
+                        v_set = k_fields[fld]
+                        if !(real_v in v_set)
+                            push!(v_set, real_v)
+                            chgd = true
+                        end
+                    end
+                end
+            end
+
+            display(commit_mapping)
         end
     end
     
@@ -1023,8 +1069,11 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             end
             
             for ref in parent_heap
-                heap_field!(s, ref, field, field_targets)
+                heap_field!(s, ref.loc, field, field_targets)
                 @show field_targets
+                for target in field_targets
+                    chgd |= propagate_heap!(s, target, pc, s.heap[pc], true)
+                end
                 empty!(field_targets)
             end
         else
@@ -2119,7 +2168,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             uprefs = sched.states.funs[t.fc].heap_uprefs[(t.pc,wait_on)]
             #@show uprefs final.heap
             for i in final.heap
-                push!(heap_use, i > 0 ? uprefs[i] : :new)
+                #push!(heap_use, i > 0 ? uprefs[i] : :new)
             end
             #=for obj in final.heap
                 up_n = 0
@@ -2592,40 +2641,52 @@ function materialize_heap(ls, pc)
     objects = Set{Any}()
     code = ls.code
     dtree = ls.dtree
+    found_locals = Set{Int}()
     while pc > 0
         if haskey(ls.phi_heap, pc)
             phi_h = ls.phi_heap[pc]
             for (refi, phi_ref) in enumerate(phi_h.refs)
-                    found = false
-                    for obj in objects
-                        for ref in obj
-                            if ref.loc.def.isphi && ref.loc.def.pc == pc && ref.loc.ref_idx == refi
-                                push!(obj, phi_ref)
-                                found = true
-                                break
-                            end
+                found = false
+                locals = setdiff(phi_h.defs[refi], found_locals)
+                for obj in objects
+                    for ref in obj[1]
+                        if ref.def.isphi && ref.def.pc == pc && ref.ref_idx == refi
+                            push!(obj[1], phi_ref.loc)
+                            union!(obj[2], locals)
+                            found = true
+                            break
                         end
                     end
-                    if !found
-                        push!(objects, Set{Any}(HeapRef[phi_ref]))
-                    end
                 end
+                if !found
+                    push!(objects, (Any[HeapLoc(Def(true, pc), refi), phi_ref.loc], locals))
+                end
+                union!(found_locals, locals)
+            end
         end
         sa_ref = ls.heap[pc]
         for (sa_refi, sa_ref) in enumerate(ls.heap[pc])
             found = false
+            locals = Set{Any}()
+            instr = code.body[pc] # ugh :(
+            if isa(instr,Expr) && instr.head == :(=)
+                push!(locals, findfirst(ls.local_names, instr.args[1]))
+            end
+            setdiff!(locals, found_locals)
             for obj in objects
-                for ref in obj
-                    if !ref.loc.def.isphi && ref.loc.def.pc == pc && ref.loc.ref_idx == sa_refi
-                        push!(obj, sa_ref)
+                for ref in obj[1]
+                    if !ref.def.isphi && ref.def.pc == pc && ref.ref_idx == sa_refi
+                        push!(obj[1], sa_ref.loc)
+                        union!(obj[2], locals)
                         found = true
                         break
                     end
                 end
             end
             if !found
-                push!(objects, Set{Any}(HeapRef[sa_ref]))
+                push!(objects, (Any[HeapLoc(Def(false, pc), sa_refi), sa_ref.loc], locals))
             end
+            union!(found_locals, locals)
         end        
         if pc in code.label_pc
             pc = dtree.idom[find_label(code, pc)][2]

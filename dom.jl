@@ -354,7 +354,7 @@ function dom_path_to!(code, dtree, pc_from, pc_to, p)
     if to_label == from_label
         return p
     else
-        @assert(to_label != 0, "asked for a non dominating path")
+        @assert(to_label != 0, "asked for a non dominating path from $pc_from")
         _, ipc = dtree.idom[to_label]
         unshift!(p, (ipc,code.label_pc[to_label]))
         return dom_path_to!(code, dtree, pc_from, ipc, p)
