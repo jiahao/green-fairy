@@ -252,7 +252,7 @@ function to_tikz(sched, fc)
             \\usepackage{setspace}
             \\usepackage{geometry}
             \\usepackage{verbatim}""")
-    println(io, """\\geometry{paperwidth=2000mm, paperheight=800pt, left=40pt, top=40pt, textwidth=2000mm, marginparsep=20pt, marginparwidth=100pt, textheight=16263pt, footskip=40pt}""")
+    println(io, """\\geometry{paperwidth=800mm, paperheight=2800pt, left=40pt, top=40pt, textwidth=800mm, marginparsep=20pt, marginparwidth=100pt, textheight=16263pt, footskip=40pt}""")
     println(io, "\\begin{document}")
     ncol = length(ls.allocs)
     cols = join(["c" for _=1:ncol], " ")
@@ -323,12 +323,12 @@ function to_tikz(sched, fc)
     run(`pdflatex out.tex`)
 end
 
-function _heap_to_dot(io, ls, pc, objects)
+function _heap_to_dot(io, ls, pc, objects,lbl="")
     println(io, "graph[rankdir=\"TB\"];")
-    println(io, "\tpc$(pc)head [style=invis,shape=none,width=0,height=0,fixedsize=\"false\",label=\"\"];");
+    println(io, "\tpc$(pc)head [shape=none,label=\"$lbl\"];");
     println(io, "\tpc$(pc)tail [style=invis,shape=none,width=0,height=0,fixedsize=\"false\",label=\"\"];");
     for (i, (locs, vars)) in enumerate(objects)
-        println(io, "\tpc$(pc)_",i," [label=\"", Base.join(map(li->ls.local_names[li],vars)," "), " (", first(locs).def.pc, ")\"];")
+        println(io, "\tpc$(pc)_",i," [label=\"", Base.join(map(li->string(ls.local_names[li]),vars)," "), "\"];")
         println(io, "\tpc$(pc)head -> pc$(pc)_$i [style=invis]")
         println(io, "\tpc$(pc)_$i -> pc$(pc)tail [style=invis]")
         found_flds = Set{Int}()
@@ -341,6 +341,7 @@ function _heap_to_dot(io, ls, pc, objects)
                     for (j, (locs, _)) in enumerate(objects)
                         if dst in locs
                             println(io, "\tpc$(pc)_", i, "->pc$(pc)_", j, " [label=\"", fld, "\"];")
+                            break
                         end
                     end
                 end
@@ -392,7 +393,11 @@ function heap_to_dot(ls)
             end
         end
         println(io, "subgraph cluster$pc {")
-        _heap_to_dot(io, ls, pc, objects[pc])
+        lblio = IOBuffer()
+        Meta.show_sexpr(lblio, ls.code.body[pc])
+        seekstart(lblio)
+
+        _heap_to_dot(io, ls, pc, objects[pc], readall(lblio))
         println(io, "\tlabel = \"", pc, "\";")
         println(io, "\tstyle = \"dashed\";")
         println(io, "}")
@@ -403,5 +408,5 @@ function heap_to_dot(ls)
     println(io, "}")
     seekstart(io)
     open(f->write(f,readall(io)), "out.dot", "w")
-    open(f->run(pipe(`dot -Tsvg out.dot`, stdout=f)), "out.svg", "w")
+    open(f->run(pipe(pipe(`dot -Tps2 out.dot`, `ps2pdf - -`), stdout=f)), "out.pdf", "w")
 end

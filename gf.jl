@@ -463,6 +463,9 @@ birthday(hr::HeapRef,years) = HeapRef(hr.loc,min(MAX_GEN,hr.gen+years),hr.alloc,
 is_mergeable(hr::HeapRef,hr2::HeapRef) = (hr.loc == hr2.loc && hr.alloc == hr2.alloc)
 join(hr::HeapRef,hr2::HeapRef) = (@assert(is_mergeable(hr,hr2)); HeapRef(hr.loc ,max(hr.gen,hr2.gen),hr.alloc,hr.outside | hr2.outside))
 
+# careful not to cross allocation edge
+direct_heap_ref(r::HeapRef, l::HeapLoc) = HeapRef(l, r.gen, r.alloc, r.outside)
+
 typealias HeapRefs Vector{HeapRef}
 
 const MAX_GEN = 5
@@ -585,7 +588,15 @@ function heap_add!(into, obj)
     push!(into, obj)
     return true, length(into)
 end
-
+# TODO no use of this function is probably fully justified
+function phi_heap_add!(into, obj)
+    chgd, ref_i = heap_add!(into.refs, obj)
+    if ref_i > length(into.defs)
+        push!(into.defs, Set{Int}())
+        push!(into.incs,Set{Int}([-1])) # we only look at the size of this for now so good enough
+    end
+    chgd, ref_i
+end
 
 # TODO better name
 # TODO move the heap_use API outside, and make it more reasonable
@@ -594,6 +605,7 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
     new_heap = Array(HeapRef, 0)
     chgd = false
     local p, li
+    incl_fst = false
     if isa(obj, Int)
         li = -1
         p = dom_path_to(s.code, s.dtree, obj, pc)
@@ -613,6 +625,7 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
         obj = obj.def
         println("Dom path for HL $(obj.pc) $pc")
         p = dom_path_to(s.code, s.dtree, obj.pc, pc)
+        incl_fst = true
         @goto init_done
     else
         println("Unknown $obj")
@@ -645,6 +658,21 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
     while !done
 #        println("Going through $curpc for $pc $exclu")
         done = curpc == pc
+        if curpc != obj.pc || incl_fst
+            cur = Def(false, curpc)
+            cur_heap = heap_for(s, cur)
+            for i = 1:length(cur_heap)
+                cur_obj = cur_heap[i]
+                for idx in eachindex(new_heap)
+                    new_heap_ref = new_heap[idx]
+                    if new_heap_ref == cur_obj
+                        new_heap[idx] = HeapRef(HeapLoc(cur, i), cur_obj.gen, cur_obj.alloc, cur_obj.outside)
+                    elseif new_heap_ref.alloc == curpc
+                        new_heap[idx] = birthday(new_heap[idx], 1)
+                    end
+                end
+            end
+        end
         if haskey(s.phi_heap, curpc)
             cur = Def(true, curpc)
             phi_heap = s.phi_heap[curpc]
@@ -679,21 +707,7 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
             end
             resize!(new_heap, length(new_heap) - n_del)
         end
-        if curpc != obj.pc
-            cur = Def(false, curpc)
-            cur_heap = heap_for(s, cur)
-            for i = 1:length(cur_heap)
-                cur_obj = cur_heap[i]
-                for idx in eachindex(new_heap)
-                    new_heap_ref = new_heap[idx]
-                    if new_heap_ref == cur_obj
-                        new_heap[idx] = HeapRef(HeapLoc(cur, i), cur_obj.gen, cur_obj.alloc, cur_obj.outside)
-                    elseif new_heap_ref.alloc == curpc
-                        new_heap[idx] = birthday(new_heap[idx], 1)
-                    end
-                end
-            end
-        end
+
         if pcur <= length(p) && curpc == p[pcur][1]
             curpc = p[pcur][2]
             pcur += 1
@@ -1019,7 +1033,11 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                                 chgd = true
                                 break
                             end
-                            k_fields[fld] = v_set
+                            k_fields[fld] = Set{HeapLoc}()
+                            for v in v_set
+                                v = haskey(commit_mapping, v) ? HeapLoc(this_def, commit_mapping[v]) : v
+                                push!(k_fields[fld], v)
+                            end
                         end
                         v_set = k_fields[fld]
                         if !(real_v in v_set)
@@ -1056,7 +1074,8 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         filter!(t -> t !== :new, sd.heap_use)
     end
     for obj in sd.heap_use
-        if isa(obj, Tuple) # getfield
+        # getfield
+        if isa(obj, Tuple)
             parent,field = obj
             @assert(field > 0) # TODO unknown fields
             parent_heap = Array(HeapRef, 0)
@@ -1070,9 +1089,19 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             
             for ref in parent_heap
                 heap_field!(s, ref.loc, field, field_targets)
-                @show field_targets
+                println("TARGETS $pc $(ref.loc) $field $field_targets")
                 for target in field_targets
                     chgd |= propagate_heap!(s, target, pc, s.heap[pc], true)
+                end
+                chgd2, ref_i = phi_heap_add!(phi_h, ref)
+                if length(field_targets) > 1 # TODO can be more precise by computing incompatibilities
+                    for target_ref in s.heap[pc]
+                        chgd2, _ = phi_heap_add!(phi_h, target_ref)
+                        chgd |= chgd2
+                    end
+                end
+                for i in eachindex(s.heap[pc])
+                    push!(get!(get!(s.heap_fields, HeapLoc(Def(true,pc),ref_i), Dict{Int,Set{HeapLoc}}()), field, Set{HeapLoc}()), HeapLoc(Def(false,pc),i))
                 end
                 empty!(field_targets)
             end
@@ -1605,7 +1634,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,env,args::Ve
         #@show callee_heaprefs
     end
 
-    # check for cached version of this call
+    # check for a version of this call that is either already stable or being computed
     fc = 0
     for fc2 in 1:length(sched.funs)
         if sched.funs[fc2] === fcode
@@ -2661,18 +2690,20 @@ function materialize_heap(ls, pc)
                 if !found
                     push!(objects, (Any[HeapLoc(Def(true, pc), refi), phi_ref.loc], locals))
                 end
-                union!(found_locals, locals)
+            end
+            for locs in phi_h.defs
+                union!(found_locals, locs)
             end
         end
         sa_ref = ls.heap[pc]
+        locals = Set{Int}()
+        instr = code.body[pc] # ugh :(
+        if isa(instr,Expr) && instr.head == :(=)
+            push!(locals, findfirst(ls.local_names, instr.args[1]))
+        end
+        setdiff!(locals, found_locals)
         for (sa_refi, sa_ref) in enumerate(ls.heap[pc])
             found = false
-            locals = Set{Any}()
-            instr = code.body[pc] # ugh :(
-            if isa(instr,Expr) && instr.head == :(=)
-                push!(locals, findfirst(ls.local_names, instr.args[1]))
-            end
-            setdiff!(locals, found_locals)
             for obj in objects
                 for ref in obj[1]
                     if !ref.def.isphi && ref.def.pc == pc && ref.ref_idx == sa_refi
@@ -2684,10 +2715,11 @@ function materialize_heap(ls, pc)
                 end
             end
             if !found
-                push!(objects, (Any[HeapLoc(Def(false, pc), sa_refi), sa_ref.loc], locals))
+                push!(objects, (Any[HeapLoc(Def(false, pc), sa_refi), sa_ref.loc], copy(locals)))
             end
-            union!(found_locals, locals)
-        end        
+        end
+        union!(found_locals, locals)
+        
         if pc in code.label_pc
             pc = dtree.idom[find_label(code, pc)][2]
         else
@@ -2739,7 +2771,7 @@ function print_code(io, sched, fc; show_heap = -1)
         end
         if show_heap == i
             for obj in materialize_heap(ls,i)
-                println(io, "- ", Base.join(String[string(ref) for ref in obj], " "))
+                println(io, "- ", map(li->ls.local_names[li],obj[2]), ": ", Base.join(String[string(ref) for ref in obj[1]], " "))
             end
         end
         println(io)
