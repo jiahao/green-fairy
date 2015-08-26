@@ -602,10 +602,11 @@ end
 # TODO move the heap_use API outside, and make it more reasonable
 function propagate_heap!(s, obj, pc, into, exclu, debug=false)
     obj != :global || return false # TODO remove me
-    new_heap = Array(HeapRef, 0)
     chgd = false
     local p, li
     incl_fst = false
+    new_heap = Array(HeapRef, 0)
+    new_heap_front = Array(Bool, 0)
     if isa(obj, Int)
         li = -1
         p = dom_path_to(s.code, s.dtree, obj, pc)
@@ -622,6 +623,7 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
         end
     elseif isa(obj, HeapLoc)
         push!(new_heap, heap_deref(s,obj))
+        push!(new_heap_front, true)
         obj = obj.def
         println("Dom path for HL $(obj.pc) $pc")
         p = dom_path_to(s.code, s.dtree, obj.pc, pc)
@@ -635,7 +637,8 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
     if !obj.isphi
         for i in eachindex(s.heap[obj.pc])
             ref = s.heap[obj.pc][i]
-            push!(new_heap, HeapRef(HeapLoc(obj,i),ref.gen,ref.alloc,ref.outside))
+            push!(new_heap, direct_heap_ref(ref, HeapLoc(obj,i)))
+            push!(new_heap_front, true)
         end
     else
         @assert(li > 0)
@@ -643,7 +646,8 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
         for ref_i in eachindex(phi_h.refs)
             if li in phi_h.defs[ref_i]
                 ref = phi_h.refs[ref_i]
-                push!(new_heap, HeapRef(HeapLoc(obj,ref_i),ref.gen,ref.alloc,ref.outside)) 
+                push!(new_heap, direct_heap_ref(ref, HeapLoc(obj,ref_i)))
+                push!(new_heap_front, true)
             end
         end
     end
@@ -661,12 +665,15 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
         if curpc != obj.pc || incl_fst
             cur = Def(false, curpc)
             cur_heap = heap_for(s, cur)
+            new_heap_indices = eachindex(new_heap) # will be grown so hoist this
             for i = 1:length(cur_heap)
                 cur_obj = cur_heap[i]
-                for idx in eachindex(new_heap)
+                for idx in new_heap_indices
                     new_heap_ref = new_heap[idx]
                     if new_heap_ref == cur_obj
-                        new_heap[idx] = HeapRef(HeapLoc(cur, i), cur_obj.gen, cur_obj.alloc, cur_obj.outside)
+                        push!(new_heap, direct_heap_ref(cur_obj, HeapLoc(cur, i)))
+                        push!(new_heap_front, true)
+                        new_heap_front[idx] = false
                     elseif new_heap_ref.alloc == curpc
                         new_heap[idx] = birthday(new_heap[idx], 1)
                     end
@@ -685,6 +692,7 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
                     new_heap_ref = new_heap[idx]
                     if cur_obj == new_heap_ref
                         push!(new_heap, HeapRef(HeapLoc(cur, i), cur_obj.gen, cur_obj.alloc,cur_obj.outside))
+                        push!(new_heap_front, true)
                         new_heap_replace[idx] += length(phi_heap.incs[i])
                     elseif obj.pc != curpc
                         haskey(s.phi_heap_gen, curpc) || continue
@@ -696,16 +704,13 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
             end
             n_inc = phi_n_live(s, curpc)
             @assert(n_inc > 0)
-            n_del = 0
             for i in eachindex(new_heap_replace)
                 if new_heap_replace[i] == n_inc
                     #@assert(new_heap_dgen[i] == 0) # TODO not really sure about that, needs thinking
-                    new_heap[i] = new_heap[end-n_del]
-                    n_del += 1
+                    new_heap_front[i] = false
                 end
                 new_heap[i] = birthday(new_heap[i], new_heap_dgen[i] == MAX_GEN_ALLOC ? MAX_GEN : new_heap_dgen[i])
             end
-            resize!(new_heap, length(new_heap) - n_del)
         end
 
         if pcur <= length(p) && curpc == p[pcur][1]
@@ -716,7 +721,8 @@ function propagate_heap!(s, obj, pc, into, exclu, debug=false)
         end
         done |= exclu && curpc == pc
     end
-    for obj in new_heap
+    for (i,obj) in enumerate(new_heap)
+        new_heap_front[i] || continue
         chgd2,_ = heap_add!(into, obj)
         chgd |= chgd2
     end

@@ -341,7 +341,6 @@ function _heap_to_dot(io, ls, pc, objects,lbl="")
                     for (j, (locs, _)) in enumerate(objects)
                         if dst in locs
                             println(io, "\tpc$(pc)_", i, "->pc$(pc)_", j, " [label=\"", fld, "\"];")
-                            break
                         end
                     end
                 end
