@@ -212,7 +212,7 @@ end
 f14() = map(y -> y*1.0, [1,2,3])
 GreenFairy.test(f14) do r
     returns(r)
-    @test r.ret_val <= Ty(Union(Vector{Int},Vector{Float64})) # due to map implementation for empty array
+    @test r.ret_val <= Ty(Union{Vector{Int},Vector{Float64}}) # due to map implementation for empty array
 end
 # base implementation special case a lot of function with a runtime test
 # it's confusing to the fairy for now

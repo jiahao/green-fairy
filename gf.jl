@@ -57,7 +57,7 @@ function show_limit(io::IO, x; limit = 80)
 end
 show_limit(x; kw...) = show_limit(STDOUT, x; kw...)
 
-typealias LocalName Union(Symbol,GenSym)
+typealias LocalName Union{Symbol,GenSym}
 # static data about a function
 include("dom.jl")
 type Code
@@ -74,7 +74,7 @@ type Code
     decl_types :: Dict{LocalName,Any}
 end
 
-import Base.convert
+import Base: <=, ==, convert
 using Base.Collections
 # ========== Lattice stuff
 abstract Lattice
@@ -161,8 +161,8 @@ meet(x,y) = x <= y ? x : y
 # ========== Type
 
 function widen(t::ANY) #TODO better this
-    if isa(t,UnionType)
-        ut = t::UnionType
+    if isa(t,Union)
+        ut = t::Union
         n = length(ut.types)
         if n == 0
             ut
@@ -171,7 +171,7 @@ function widen(t::ANY) #TODO better this
             for i=1:n
                 r[i] = widen(ut.types[i])
             end
-            Union(r...)
+            Union{r...}
         end
     elseif t <: Tuple
         tt = t::DataType
@@ -191,9 +191,9 @@ immutable Ty <: Lattice
     Ty(t::ANY) = (tt = widen(t)::Type; new(tt))
 end
 top(::Type{Ty}) = Ty(Any)
-bot(::Type{Ty}) = Ty(Union())
+bot(::Type{Ty}) = Ty(Union{})
 istop(t::Ty) = t.ty === Any
-isbot(t::Ty) = isa(t.ty,UnionType) && length((t.ty::UnionType).types) == 0
+isbot(t::Ty) = isa(t.ty,Union) && length((t.ty::Union).types) == 0
 function Base.show(io::IO, x::Ty)
     istop(x) && return print(io, TOP_SYM)
     isbot(x) && return print(io, BOT_SYM)
@@ -229,7 +229,7 @@ function meet(x::Kind,y::Kind)
     Kind(meet(x.ub,y.ub))
 end
 
-    
+
 Base.show(io::IO,k::Kind) = istop(k) ? print(io, TOP_SYM) : isbot(k) ? print(io, BOT_SYM) : print(io, "kind(", k.ub, ")")
 
 
@@ -481,15 +481,15 @@ PhiHeap() = PhiHeap(HeapRef[],Array(Set{Int},0), Array(Set{Int},0))
 type LocalStore{V<:Lattice}
     local_names :: Vector{LocalName}
     defs :: Vector{DefStore{Set{Int}}}
-    
+
     sa :: Vector{V} # pc => value
     phis :: Vector{Dict{Int,V}} # local => label => phi value
     phis_live :: Dict{Int,Vector{Bool}} # label => inc => liveness
-    
+
     len :: Int
     code :: Code
     dtree :: DomTree
-    
+
     heap :: Vector{HeapRefs} # pc => heap backref
     phi_heap :: Dict{Int,PhiHeap} # pc => phi heap
     allocs :: Vector{Int} # sorted pcs
@@ -497,7 +497,7 @@ type LocalStore{V<:Lattice}
     heap_uprefs :: Dict{Tuple{Int,Int},Vector{Int}} # pc => callee => [upref1, ..., uprefn]
 
     heap_fields :: Dict{HeapLoc,Dict{Int,Set{HeapLoc}}}
-    
+
     changed :: BitVector
 end
 
@@ -511,7 +511,7 @@ function LocalStore{V}(::Type{V}, code::Code)
                V[bot(V) for i=1:n+1], Array(Dict{Int,V},0),
                Dict{Int,Vector{Bool}}(),
                n, code, build_dom_tree(code),
-               
+
                [Array(HeapRef,0) for i=1:n+1],
                Dict{Int,PhiHeap}(),
                Array(Int,0),
@@ -749,7 +749,7 @@ function restrict_heap_ref(s, h, pc)
         hlabel = find_label(s.code, h.loc.def.pc)
         hdepth = dom_depth(s.dtree, hlabel)
         @assert hdepth >= 0
-        
+
         if haskey(s.heap_fields, h.loc)
             for (k,v) in s.heap_fields[h.loc]
                 if !haskey(fields, k)
@@ -808,7 +808,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             s.phis[li][0] = bot(V)
         end
     end
-    
+
     # update phi pred liveness
     next_lbl = findfirst(s.code.label_pc, next)
     if next_lbl > 0
@@ -829,7 +829,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
         end
         @assert(found)
     end
-    
+
     # update phis
     lbl = findfirst(s.code.label_pc, pc)
     if lbl > 0
@@ -916,12 +916,12 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             summarize_mapping = Dict{HeapLoc,HeapRef}()
             # li => actuals
             local_mapping = Dict{Int,Set{HeapRef}}()
-            
+
             field_mapping = Dict{HeapLoc,Dict{Int,Set{HeapLoc}}}()
             # loc => this_phi_ref_id
             commit_mapping = Dict{HeapLoc,Int}()
             queue = Set{HeapRef}()
-            
+
             additional = Array(HeapRef,0)
             for li in eachindex(s.local_names)
                 propagate_heap!(s, s.local_names[li], pred, additional, false)
@@ -1057,7 +1057,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             display(commit_mapping)
         end
     end
-    
+
     # do defs
     for idx = 1:length(d)
         li = findfirst(s.local_names, d[idx].name)
@@ -1092,7 +1092,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
                 ph = PhiHeap()
                 ph
             end
-            
+
             for ref in parent_heap
                 heap_field!(s, ref.loc, field, field_targets)
                 println("TARGETS $pc $(ref.loc) $field $field_targets")
@@ -1115,7 +1115,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             chgd |= propagate_heap!(s, obj, pc, s.heap[pc], true)
         end
     end
-    
+
     # heap setfield
     for (parent,field,child) in sd.heap_setfield
         @assert(field > 0) # TODO unknown fields
@@ -1129,7 +1129,7 @@ function propagate!{V}(s::LocalStore{V},pc::Int,next::Int,sd::StateDiff)
             ph = PhiHeap()
             ph
         end
-        
+
         for parent_ref in parent_heap
             chgd2,ref_i = heap_add!(phi_h.refs, parent_ref)
             if ref_i > length(phi_h.defs)
@@ -1229,9 +1229,9 @@ function <={V}(s1::InitialState{V},s2::InitialState{V})
             v1 <= v2 || return false
         end
     end
-    
+
     # TODO compare heaps
-    
+
     true
 end
 function ensure_filled!{V,I,F}(s::State{V,I,F}, fc::Int, code::Code, initial::InitialState)
@@ -1253,7 +1253,7 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
         li = add_local!(ls, code.args[i])
         args_li[k] = li
         ls.phis[li][0] = is.args[i]
-        
+
         heap = is.heap[k]
         for init_ref in heap
             arg_i, ref_i = init_ref
@@ -1261,13 +1261,13 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
             push!(initial_phi_heap.defs, Set{Int}([arg_li[arg_i]]))
             push!(initial_phi_heap.incs, Set{Int}())
         end
-        
+
         k+=1
     end
     for i = 1:length(is.capt)
         li = add_local!(ls, code.capt[i])
         ls.phis[li][0] = is.capt[i]
-        
+
         args_li[k] = li
         heap = is.heap[k]
         for init_ref in heap
@@ -1281,7 +1281,7 @@ function apply_initial!(s::State,is::InitialState,fc::Int,code::Code)
     for i = 1:length(is.tenv)
         li = add_local!(ls, code.tvar_mapping[2*i-1].name)
         ls.phis[li][0] = is.tenv[i]
-        
+
         args_li[k] = li
         heap = is.heap[k]
         for init_ref in heap
@@ -1299,7 +1299,7 @@ end
 eval_local(s::State, fc::Int, pc::Int, name) = eval_local(s.funs[fc], pc, name)
 function propagate!{V,LV}(s::State,fc::Int,pc::Int,next::Int,sd::StateDiff{V,LV})
     chgd = false
-    
+
     l = length(s.lost[fc])
     union!(s.lost[fc], sd.lost)
     chgd |= (l != length(s.lost[fc]))
@@ -1330,7 +1330,7 @@ type FinalState{V} <: Lattice
 end
 bot{V}(::Type{FinalState{V}}) = FinalState(bot(V),Set{Int}(),bot(V),true,Set{Int}(),0)
 function Base.show(io::IO, s::FinalState)
-    print(io, "(returned: ", s.ret_val, " [", Base.join(collect(s.ret_sa), ","), "] : [", Base.join(String[string(h) for h in s.heap], ","), "]")
+    print(io, "(returned: ", s.ret_val, " [", Base.join(collect(s.ret_sa), ","), "] : [", Base.join(AbstractString[string(h) for h in s.heap], ","), "]")
     if !isbot(s.thrown)
         print(io, " , ", s.must_throw ? "must" : "may", " throw ", s.thrown)
     end
@@ -1518,7 +1518,7 @@ function code_for_method(metht, argtypes::ANY)
                 func = ccall(:jl_instantiate_staged, Any,(Any,Any,Any), meth, Tuple{argtypes...}, tenv)
             catch
                 return top(ConstCode{Ty})
-            end                
+            end
             _staged_cache[key] = func
         else
             _staged_cache[key] :: Function
@@ -1557,7 +1557,7 @@ function call_gate(f,v::Const)
     top(Const)
 end
 call_gate(f,v::Kind) = v
-call_gate(f,v::Union(Sign,Ty)) = v
+call_gate(f,v::Union{Sign,Ty}) = v
 call_gate(f,v::ConstCode) = v
 call_gate(f,p::Prod) = prod(map(v->call_gate(f,v),p.values))
 NOMETH = 0
@@ -1659,7 +1659,7 @@ function eval_call_code!{V,S}(sched::Scheduler{V,S},t::Thread,fcode,env,args::Ve
     if t.fc > 0
         sched.states.funs[t.fc].heap_uprefs[t.pc,fc] = args_sa# TODO assert empty ?
     end
-    
+
     push!(t.wait_on, fc)
     if t.fc > 0
         #println(sched.funs[fc], " by ", sched.funs[t.fc], " : ", t.wait_on, " (", sched.done[fc], ")")
@@ -1710,9 +1710,9 @@ function eval_call!{S,V}(sched::Scheduler{V,S}, t::Thread, sd::StateDiff, fun::V
         args = actual_args
         args_sa = Int[1 for _ in actual_args] # TODO wrong
     end
-    
+
     # actually do the call
-    
+
     cc = convert(ConstCode,fun)
     # known lambda
     if !istop(cc)
@@ -1856,7 +1856,7 @@ const INTR_TYPES = [
                     (Int,[Core.sizeof]),
                     (DataType, [Base.fieldtype]),
                     (Union{DataType,Union},[Base.apply_type]),
-                    (UnionType, [Base.Union]),
+                    (Union, [Base.Union]),
                     (SimpleVector, [Base.svec]),
                     (Any,[Core.eval]),
                     (Int32, [OtherBuiltins.isleaftype])
@@ -1873,7 +1873,7 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
             end
         end
     end
-    
+
     # cglobal and typassert take the return type as second argument ...
     if f <= Const(Base.cglobal)
         cty = convert(Const, args[2])
@@ -1925,7 +1925,7 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
         aty = argtypes[1].ty
         aty === Module && return top(V)
         istuple = aty <: Tuple
-        (isa(aty,UnionType) || aty.abstract) && return top(V) #TODO could do better here
+        (isa(aty,Union) || aty.abstract) && return top(V) #TODO could do better here
         len = length(aty.types)
         isva = istuple && len > 0 && aty.types[end] <: Vararg
         isva && (len -= 1)
@@ -1965,7 +1965,7 @@ function eval_call_values!{V}(sched::Scheduler, t::Thread, sd::StateDiff, ::Type
         argtypes[1] <= Ty(Array) || return top(V)
         aty = argtypes[1].ty
         resty = bot(Ty)
-        if isa(aty, UnionType)
+        if isa(aty, Union)
             for aty in aty.types
                 @assert(isa(aty,DataType) && aty.name === Array.name)
                 resty = join(resty, Ty(aty.parameters[1]))
@@ -2182,7 +2182,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
     TRACE = GTRACE
     code = sched.funs[t.fc]
     sd = StateDiff(t,V,V)
-    
+
     TRACE && println("Step thread ",t.fc, ":", t.pc)
     next_pc = branch_pc = t.pc+1
     e = code.body[t.pc]
@@ -2221,7 +2221,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
                 end
             end=#
             #resize!(upr, max(length(upr), up_n))
-            
+
             if !sched.done[wait_on] # cycle
                 ncycled += 1
                 t.wait_on[ncycled] = wait_on
@@ -2243,7 +2243,7 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         #=println("Returned heap : $(final.heap) from")
         println("Uprefs : $()")
         for obj in final.heap
-            
+
         end=#
     elseif isa(e, Expr) && (e.head === :call || e.head === :call1 || e.head === :new)
         args = code.call_args[t.pc]
@@ -2304,12 +2304,12 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
         return
     end
     sd.sa_name = t.pc
-    
+
     TRACE && (print("> ");Meta.show_sexpr(e);println("  →  ", sd.value, "\n"))
-    
+
     could_throw = !isbot(sd.thrown)
     must_throw = sd.must_throw
-    
+
     branch_sd = sd
     if could_throw
         @assert next_pc == branch_pc == t.pc+1 # branching cannot throw
@@ -2347,11 +2347,11 @@ function step!{V,S}(sched::Scheduler{V,S}, t::Thread, conf::Config)
             ft = fork(sched, t, branch_pc)
         end
     end
-    
+
     if !chgd
         next_pc = length(code.body)+1
     end
-    
+
     t.pc = next_pc
     nothing
 end
@@ -2398,14 +2398,14 @@ function step!(s::Scheduler)
         fc = t.fc
         t.pc = length(s.funs[fc].body) + 1
         push!(s.done_threads,t)
-        
+
         same_func = Array(Int,0)
         for i in 1:length(s.threads)
             if s.threads[i].fc == fc
                 push!(same_func, i)
             end
         end
-        
+
         isdone = isempty(same_func)
         mincycle = isdone ? -1 : minimum(Int[s.threads[i].cycle for i in same_func])
         if !isdone && mincycle > t.cycle
@@ -2538,7 +2538,7 @@ const _code_cache = ObjectIdDict()#Dict{Any,Code}()
 const SR = []
 
 function tenv_from_ast(ast)
-    
+
 end
 function capt_from_ast(ast)
     if !isa(ast,Expr)
@@ -2574,7 +2574,7 @@ function code_from_ast(linf,tenv,sig::ANY,ast=nothing)
     #=for (i,(b,apc)) in enumerate(zip(body,args_pc))
         println(i, ") ", b, " -- ", apc)
     end=#
-    
+
     # TODO ask Jeff if this is the easiest way to sort out this mess
     # probably not
     locs = Set{LocalName}()
@@ -2642,7 +2642,7 @@ function code_from_ast(linf,tenv,sig::ANY,ast=nothing)
             end
         end
     end
-    
+
     HIT[1] += length(gensy)
     HIT[2] += length(locs)
     HIT[3] += length(sa)
@@ -2725,7 +2725,7 @@ function materialize_heap(ls, pc)
             end
         end
         union!(found_locals, locals)
-        
+
         if pc in code.label_pc
             pc = dtree.idom[find_label(code, pc)][2]
         else
@@ -2777,7 +2777,7 @@ function print_code(io, sched, fc; show_heap = -1)
         end
         if show_heap == i
             for obj in materialize_heap(ls,i)
-                println(io, "- ", map(li->ls.local_names[li],obj[2]), ": ", Base.join(String[string(ref) for ref in obj[1]], " "))
+                println(io, "- ", map(li->ls.local_names[li],obj[2]), ": ", Base.join(AbstractString[string(ref) for ref in obj[1]], " "))
             end
         end
         println(io)
